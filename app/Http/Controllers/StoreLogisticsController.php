@@ -11,6 +11,7 @@ use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -76,6 +77,7 @@ class StoreLogisticsController extends Controller
         $yapeEnabled = (bool) $yapePlin['enabled'] && filled($yapePlin['phone']);
 
         return [
+            'card_enabled' => filled(config('services.mercadopago.access_token')),
             'bank_transfer' => [
                 'enabled' => $bankEnabled,
                 'bank' => $bankEnabled ? $bankTransfer['bank'] : null,
@@ -119,7 +121,10 @@ class StoreLogisticsController extends Controller
             throw ValidationException::withMessages(['metodo_envio' => 'El envío Same-day solo está disponible para Lima.']);
         }
         $paymentOptions = $this->configuredPaymentOptions();
-        if (! $paymentOptions[$data['payment_method']]['enabled']) {
+        $paymentMethodEnabled = $data['payment_method'] === 'card'
+            ? $paymentOptions['card_enabled']
+            : $paymentOptions[$data['payment_method']]['enabled'];
+        if (! $paymentMethodEnabled) {
             throw ValidationException::withMessages([
                 'payment_method' => 'El método de pago seleccionado todavía no está configurado.',
             ]);
@@ -201,6 +206,116 @@ class StoreLogisticsController extends Controller
         ]), 201);
     }
 
+    public function startCardPayment(Request $request, StoreOrder $storeOrder)
+    {
+        abort_unless($storeOrder->client_id === $request->user()->client->id, 404);
+        abort_unless($storeOrder->payment_method === 'card', 409, 'El pedido no está configurado para pagar con tarjeta.');
+
+        if (! in_array($storeOrder->payment_status, ['pendiente', 'rechazado'], true)) {
+            throw ValidationException::withMessages([
+                'payment' => 'Este pedido ya no admite un nuevo intento de pago.',
+            ]);
+        }
+        if ($storeOrder->payment_status === 'pendiente' && filled($storeOrder->provider_checkout_url)) {
+            return response()->json([
+                'checkout_url' => $storeOrder->provider_checkout_url,
+                'payment_status' => 'pendiente',
+            ]);
+        }
+
+        $accessToken = config('services.mercadopago.access_token');
+        if (blank($accessToken)) {
+            return response()->json([
+                'message' => 'El pago con tarjeta aún no está habilitado. Configura MERCADOPAGO_ACCESS_TOKEN en el servidor.',
+                'code' => 'payment_provider_not_configured',
+            ], 503);
+        }
+
+        $storeOrder->load('items');
+        $externalReference = "store-order-{$storeOrder->id}-".Str::uuid();
+        $frontUrl = rtrim(config('services.mercadopago.return_url'), '/').'/tienda?pedido='.$storeOrder->id;
+        $webhookUrl = config('services.mercadopago.webhook_url')
+            ?: url('/api/payments/mercadopago/webhook');
+        $items = $storeOrder->items->map(fn ($item) => [
+            'id' => (string) ($item->product_id ?? $item->id),
+            'title' => $item->nombre,
+            'quantity' => $item->cantidad,
+            'unit_price' => (float) $item->precio_unitario,
+            'currency_id' => 'PEN',
+        ])->all();
+
+        if ((float) $storeOrder->costo_envio > 0) {
+            $items[] = [
+                'id' => "store-order-{$storeOrder->id}-shipping",
+                'title' => "Envío del pedido #{$storeOrder->id}",
+                'quantity' => 1,
+                'unit_price' => (float) $storeOrder->costo_envio,
+                'currency_id' => 'PEN',
+            ];
+        }
+
+        try {
+            $preference = Http::withToken($accessToken)
+                ->acceptJson()
+                ->timeout(15)
+                ->post('https://api.mercadopago.com/checkout/preferences', [
+                    'items' => $items,
+                    'external_reference' => $externalReference,
+                    'notification_url' => $webhookUrl,
+                    'back_urls' => [
+                        'success' => $frontUrl.'&pago=exitoso',
+                        'pending' => $frontUrl.'&pago=pendiente',
+                        'failure' => $frontUrl.'&pago=fallido',
+                    ],
+                    'auto_return' => 'approved',
+                    'metadata' => [
+                        'store_order_id' => $storeOrder->id,
+                    ],
+                    'expires' => true,
+                    'expiration_date_from' => now()->toIso8601String(),
+                    'expiration_date_to' => $storeOrder->payment_due_at->toIso8601String(),
+                ]);
+            $preference->throw();
+
+            $checkoutUrl = $preference->json('init_point');
+            $preferenceId = $preference->json('id');
+            $checkoutHost = is_string($checkoutUrl) ? parse_url($checkoutUrl, PHP_URL_HOST) : null;
+            if (
+                ! is_string($checkoutUrl)
+                || ! filter_var($checkoutUrl, FILTER_VALIDATE_URL)
+                || parse_url($checkoutUrl, PHP_URL_SCHEME) !== 'https'
+                || ! is_string($checkoutHost)
+                || preg_match('/(^|\.)mercadopago\.(com|com\.[a-z]{2}|[a-z]{2})$/D', $checkoutHost) !== 1
+                || ! is_string($preferenceId)
+                || $preferenceId === ''
+            ) {
+                throw new \UnexpectedValueException('Mercado Pago no devolvió una preferencia de pago válida.');
+            }
+
+            $storeOrder->update([
+                'provider_reference' => $externalReference,
+                'provider_preference_id' => $preferenceId,
+                'provider_payment_id' => null,
+                'provider_checkout_url' => $checkoutUrl,
+                'payment_status' => 'pendiente',
+            ]);
+
+            return response()->json([
+                'checkout_url' => $checkoutUrl,
+                'payment_status' => 'pendiente',
+            ], 201);
+        } catch (Throwable $exception) {
+            Log::error('No se pudo crear el checkout de Mercado Pago para una orden.', [
+                'order_id' => $storeOrder->id,
+                'exception' => $exception->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'No se pudo iniciar el pago con tarjeta. Inténtalo nuevamente.',
+            ], 502);
+        }
+    }
+
     private static function amountToCents(string|int|float $amount): int
     {
         [$whole, $fraction] = array_pad(explode('.', (string) $amount, 2), 2, '');
@@ -226,16 +341,44 @@ class StoreLogisticsController extends Controller
         $month = Carbon::createFromFormat('!Y-m', $data['month'] ?? now()->format('Y-m'));
         $periodMovements = StockMovement::query()
             ->whereBetween('created_at', [$month->copy()->startOfMonth(), $month->copy()->endOfMonth()]);
-        $unitsSold = (clone $periodMovements)
+        $activePeriodMovements = (clone $periodMovements)
+            ->whereHas('product', fn ($query) => $query->where('activo', true));
+        $unitsSold = (clone $activePeriodMovements)
             ->where('tipo', 'salida')
             ->whereNotNull('order_id')
             ->whereHas('order', fn ($query) => $query->where('payment_status', 'pagado'))
             ->sum('cantidad');
-        $unitsOut = (clone $periodMovements)->where('tipo', 'salida')->sum('cantidad');
-        $unitsReceived = (clone $periodMovements)->where('tipo', 'entrada')->sum('cantidad');
-        $currentStock = StoreProduct::sum('stock');
+        $unitsOut = (clone $activePeriodMovements)->where('tipo', 'salida')->sum('cantidad');
+        $unitsReceived = (clone $activePeriodMovements)->where('tipo', 'entrada')->sum('cantidad');
+        $currentStock = StoreProduct::where('activo', true)->sum('stock');
         $openingStock = max(0, $currentStock - $unitsReceived + $unitsOut);
         $averageStock = ($openingStock + $currentStock) / 2;
+        $fastMovers = (clone $periodMovements)
+            ->where('tipo', 'salida')
+            ->whereNotNull('order_id')
+            ->whereHas('order', fn ($query) => $query->where('payment_status', 'pagado'))
+            ->whereHas('product', fn ($query) => $query->where('activo', true))
+            ->with('product:id,sku,nombre,ubicacion_almacen')
+            ->select('product_id')
+            ->selectRaw('SUM(cantidad) as units_sold')
+            ->groupBy('product_id')
+            ->orderByDesc('units_sold')
+            ->limit(5)
+            ->get()
+            ->map(fn (StockMovement $movement) => [
+                'product_id' => $movement->product_id,
+                'sku' => $movement->product?->sku,
+                'nombre' => $movement->product?->nombre ?? 'Producto eliminado',
+                'ubicacion_almacen' => $movement->product?->ubicacion_almacen,
+                'units_sold' => (int) $movement->units_sold,
+            ])
+            ->values();
+        $returnResolutions = StoreReturn::query()
+            ->whereNotNull('resuelta_at')
+            ->select('resolucion')
+            ->selectRaw('COUNT(*) as total')
+            ->groupBy('resolucion')
+            ->pluck('total', 'resolucion');
         $perPage = $data['per_page'] ?? 50;
 
         $products = StoreProduct::query()
@@ -246,11 +389,15 @@ class StoreLogisticsController extends Controller
             ->orderByDesc('created_at')
             ->orderByDesc('id')
             ->paginate($perPage, ['*'], 'movements_page');
-        $orders = StoreOrder::with(['client:id,nombre,empresa', 'items', 'returnRequest'])
+        $orders = StoreOrder::with(['client:id,nombre,empresa', 'items.product:id,ubicacion_almacen', 'returnRequest'])
             ->orderByDesc('created_at')
             ->orderByDesc('id')
             ->paginate($perPage, ['*'], 'orders_page');
-        $returns = StoreReturn::with(['order:id,client_id,estado,total', 'order.client:id,nombre,empresa', 'order.items'])
+        $returns = StoreReturn::with([
+            'order:id,client_id,estado,total',
+            'order.client:id,nombre,empresa',
+            'order.items.product:id,ubicacion_almacen',
+        ])
             ->orderByDesc('created_at')
             ->orderByDesc('id')
             ->paginate($perPage, ['*'], 'returns_page');
@@ -271,6 +418,13 @@ class StoreLogisticsController extends Controller
                 'out_of_stock' => StoreProduct::where('stock', 0)->count(),
                 'units_sold' => (int) $unitsSold,
                 'inventory_rotation' => $averageStock > 0 ? round($unitsSold / $averageStock, 2) : 0,
+                'fast_movers' => $fastMovers,
+                'return_resolutions' => [
+                    'reventa' => (int) ($returnResolutions['reventa'] ?? 0),
+                    'reparacion' => (int) ($returnResolutions['reparacion'] ?? 0),
+                    'desecho' => (int) ($returnResolutions['desecho'] ?? 0),
+                    'reembolso' => (int) ($returnResolutions['reembolso'] ?? 0),
+                ],
             ],
             'shipping' => SiteSetting::publicSettings()['coverage'],
         ]);
@@ -491,6 +645,11 @@ class StoreLogisticsController extends Controller
             $previousPath = DB::transaction(function () use ($request, $storeOrder, $file, $path) {
                 $order = StoreOrder::query()->lockForUpdate()->findOrFail($storeOrder->id);
                 abort_unless($order->client_id === $request->user()->client->id, 404);
+                if (! in_array($order->payment_method, ['bank_transfer', 'yape_plin'], true)) {
+                    throw ValidationException::withMessages([
+                        'file' => 'Los pagos con tarjeta no admiten comprobantes manuales.',
+                    ]);
+                }
                 if (! in_array($order->payment_status, ['pendiente', 'rechazado'], true)) {
                     throw ValidationException::withMessages([
                         'file' => 'Este pedido no admite otro comprobante.',
@@ -582,7 +741,13 @@ class StoreLogisticsController extends Controller
         $data = $request->validate([
             'estado' => ['required', Rule::in(StoreReturn::ESTADOS)],
             'resolucion' => ['nullable', Rule::in(StoreReturn::RESOLUCIONES)],
-            'notas_inspeccion' => ['nullable', 'string', 'max:3000'],
+            'notas_inspeccion' => [
+                Rule::requiredIf(($request->input('estado') ?? null) === 'inspeccionada'),
+                'nullable',
+                'string',
+                'min:5',
+                'max:3000',
+            ],
         ]);
 
         $return = DB::transaction(function () use ($request, $storeReturn, $data) {
@@ -639,7 +804,7 @@ class StoreLogisticsController extends Controller
     public function clientOrders(Request $request)
     {
         return response()->json($request->user()->client->storeOrders()
-            ->with(['items', 'returnRequest'])
+            ->with(['items', 'returnRequest', 'client:id,nombre,empresa'])
             ->latest()
             ->get());
     }

@@ -11,7 +11,7 @@ class StoreOrder extends Model
 {
     public const ESTADOS = ['recibido', 'en_picking', 'empacado', 'enviado', 'entregado'];
 
-    public const PAYMENT_METHODS = ['bank_transfer', 'yape_plin'];
+    public const PAYMENT_METHODS = ['bank_transfer', 'yape_plin', 'card'];
 
     public const PAYMENT_STATUSES = ['pendiente', 'comprobante_enviado', 'pagado', 'rechazado', 'expirado'];
 
@@ -20,6 +20,10 @@ class StoreOrder extends Model
         'estado',
         'payment_method',
         'payment_status',
+        'provider_reference',
+        'provider_preference_id',
+        'provider_payment_id',
+        'provider_checkout_url',
         'receipt_path',
         'receipt_original_name',
         'receipt_mime_type',
@@ -40,7 +44,7 @@ class StoreOrder extends Model
         'entregado_at',
     ];
 
-    protected $hidden = ['receipt_path'];
+    protected $hidden = ['receipt_path', 'provider_reference', 'provider_preference_id', 'provider_checkout_url'];
 
     protected function casts(): array
     {

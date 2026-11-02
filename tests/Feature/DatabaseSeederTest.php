@@ -12,11 +12,18 @@ class DatabaseSeederTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_database_seeder_does_not_publish_unverified_portfolio_or_testimonials(): void
+    public function test_database_seeder_publishes_only_the_verified_digitalpyme_own_project(): void
     {
         $this->seed();
 
-        $this->assertSame(0, PortfolioProject::count());
+        $this->assertDatabaseCount('portfolio_projects', 1);
+        $this->assertDatabaseHas('portfolio_projects', [
+            'nombre' => 'DigitalPyme',
+            'categoria' => 'Proyecto propio',
+            'resultado' => 'Catálogo de servicios y solicitudes de cotización',
+            'imagen' => '/portfolio/digitalpyme-catalogo.svg',
+            'activo' => true,
+        ]);
         $this->assertSame(0, Testimonio::count());
     }
 

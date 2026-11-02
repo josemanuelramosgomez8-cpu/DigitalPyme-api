@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\ServiceCategory;
+use App\Models\ServiceReview;
 use App\Models\Servicio;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -11,6 +12,49 @@ use Tests\TestCase;
 class ServiceDetailsAndReviewsTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_public_review_feed_only_returns_approved_reviews_for_active_services_without_private_email(): void
+    {
+        $activeService = Servicio::create([
+            'nombre' => 'Landing page',
+            'slug' => 'landing-page',
+            'activo' => true,
+        ]);
+        $inactiveService = Servicio::create([
+            'nombre' => 'Servicio oculto',
+            'slug' => 'servicio-oculto',
+            'activo' => false,
+        ]);
+        $approvedReview = $activeService->reviews()->create([
+            'nombre' => 'Cliente',
+            'email' => 'private@example.com',
+            'calificacion' => 5,
+            'titulo' => 'Excelente',
+            'comentario' => 'Muy buena experiencia.',
+            'aprobada' => true,
+        ]);
+        $activeService->reviews()->create([
+            'nombre' => 'Pendiente',
+            'email' => 'pending@example.com',
+            'calificacion' => 4,
+            'comentario' => 'Aún no aprobada.',
+        ]);
+        $inactiveService->reviews()->create([
+            'nombre' => 'Otro cliente',
+            'email' => 'inactive@example.com',
+            'calificacion' => 4,
+            'comentario' => 'El servicio está oculto.',
+            'aprobada' => true,
+        ]);
+
+        $this->getJson('/api/resenas')
+            ->assertOk()
+            ->assertJsonCount(1)
+            ->assertJsonPath('0.id', $approvedReview->id)
+            ->assertJsonPath('0.service.slug', 'landing-page')
+            ->assertJsonPath('0.calificacion', 5)
+            ->assertJsonMissingPath('0.email');
+    }
 
     public function test_service_details_return_slug_taxonomy_and_only_approved_reviews_without_private_email(): void
     {

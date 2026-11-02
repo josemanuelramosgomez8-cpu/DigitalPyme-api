@@ -5,6 +5,7 @@ namespace Database\Seeders;
 use App\Models\Servicio;
 use App\Models\ServiceCategory;
 use App\Models\ServiceSubcategory;
+use App\Models\PortfolioProject;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Str;
 
@@ -98,6 +99,19 @@ class DatabaseSeeder extends Seeder
             if ($subcategory && !$service->subcategory_id) $changes['subcategory_id'] = $subcategory->id;
             if ($changes) $service->update($changes);
         }
+
+        PortfolioProject::firstOrCreate(
+            ['nombre' => 'DigitalPyme'],
+            [
+                'categoria' => 'Proyecto propio',
+                'resultado' => 'Catálogo de servicios y solicitudes de cotización',
+                'imagen' => '/portfolio/digitalpyme-catalogo.svg',
+                'imagen_alt' => 'Ilustración original del sitio DigitalPyme con su catálogo de servicios.',
+                'related_service_id' => Servicio::where('slug', 'paginas-web')->value('id'),
+                'activo' => true,
+                'orden' => 1,
+            ],
+        );
 
         $this->call(StoreDemoSeeder::class);
     }

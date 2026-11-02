@@ -32,6 +32,7 @@ Route::get('/servicios', [ServicioController::class, 'publicos']);
 Route::get('/servicios/{slug}', [ServicioController::class, 'show'])->where('slug', '[a-z0-9-]+');
 Route::get('/servicios/{servicio}/resenas', [ServiceReviewController::class, 'index'])->whereNumber('servicio');
 Route::post('/servicios/{servicio}/resenas', [ServiceReviewController::class, 'store'])->middleware('throttle:5,1')->whereNumber('servicio');
+Route::get('/resenas', [ServiceReviewController::class, 'publicos']);
 Route::get('/categorias-servicios', [ServiceCategoryController::class, 'publicIndex']);
 Route::get('/portafolio', [PortfolioProjectController::class, 'publicos']);
 Route::get('/testimonios', [TestimonioController::class, 'publicos']);
@@ -128,6 +129,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/password', [AuthController::class, 'clientChangePassword']);
         Route::get('/store/orders', [StoreLogisticsController::class, 'clientOrders']);
         Route::post('/store/orders', [StoreLogisticsController::class, 'checkout']);
+        Route::post('/store/orders/{storeOrder}/payments/card', [StoreLogisticsController::class, 'startCardPayment'])->middleware('throttle:5,1');
         Route::post('/store/orders/{storeOrder}/receipt', [StoreLogisticsController::class, 'uploadClientReceipt'])->middleware('throttle:10,1');
         Route::get('/store/orders/{storeOrder}/receipt', [StoreLogisticsController::class, 'clientReceipt']);
         Route::post('/store/orders/{storeOrder}/returns', [StoreLogisticsController::class, 'clientReturn']);

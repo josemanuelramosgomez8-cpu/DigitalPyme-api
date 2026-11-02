@@ -67,8 +67,9 @@ class PublicCatalogTest extends TestCase
 
         $this->getJson('/api/portafolio')
             ->assertOk()
-            ->assertJsonCount(1)
-            ->assertJsonPath('0.nombre', 'Proyecto verificado');
+            ->assertJsonCount(2)
+            ->assertJsonPath('0.nombre', 'DigitalPyme')
+            ->assertJsonPath('1.nombre', 'Proyecto verificado');
 
         $this->getJson('/api/testimonios')
             ->assertOk()

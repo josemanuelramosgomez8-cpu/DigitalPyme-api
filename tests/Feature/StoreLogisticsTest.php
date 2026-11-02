@@ -10,6 +10,7 @@ use App\Models\StoreReturn;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -104,6 +105,7 @@ class StoreLogisticsTest extends TestCase
 
         $this->getJson('/api/store/payment-options')
             ->assertOk()
+            ->assertJsonPath('card_enabled', false)
             ->assertJsonPath('bank_transfer.enabled', false)
             ->assertJsonPath('yape_plin.enabled', false);
 
@@ -126,6 +128,92 @@ class StoreLogisticsTest extends TestCase
             ->assertJsonValidationErrors(['payment_method']);
 
         $this->assertDatabaseCount('store_orders', 0);
+    }
+
+    public function test_store_card_checkout_is_confirmed_only_after_mercado_pago_webhook_matches_amount_and_currency(): void
+    {
+        Storage::fake('local');
+        config([
+            'services.mercadopago.access_token' => 'test-access-token',
+            'services.mercadopago.return_url' => 'https://digitalpyme.test',
+            'services.mercadopago.webhook_url' => 'https://api.digitalpyme.test/api/payments/mercadopago/webhook',
+        ]);
+        Http::fake([
+            'https://api.mercadopago.com/checkout/preferences' => Http::response([
+                'id' => 'preference-123',
+                'init_point' => 'https://www.mercadopago.com.pe/checkout/v1/redirect?pref_id=preference-123',
+            ], 201),
+        ]);
+
+        $clientUser = User::factory()->create(['is_client' => true]);
+        Client::create(['user_id' => $clientUser->id, 'nombre' => $clientUser->name]);
+        $product = StoreProduct::create([
+            'sku' => 'CARD-CHECKOUT',
+            'nombre' => 'Producto con tarjeta',
+            'precio' => 45,
+            'stock' => 2,
+        ]);
+
+        $orderId = $this->actingAs($clientUser)->postJson('/api/client/store/orders', [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            'metodo_envio' => 'estandar',
+            'payment_method' => 'card',
+            'ubicacion_entrega' => 'Lima',
+            'direccion_entrega' => 'Av. Demo 123',
+        ])->assertCreated()
+            ->assertJsonPath('payment_status', 'pendiente')
+            ->json('id');
+
+        $this->getJson('/api/store/payment-options')
+            ->assertOk()
+            ->assertJsonPath('card_enabled', true);
+
+        $this->postJson("/api/client/store/orders/{$orderId}/payments/card")
+            ->assertCreated()
+            ->assertJsonPath('checkout_url', 'https://www.mercadopago.com.pe/checkout/v1/redirect?pref_id=preference-123');
+        $this->postJson("/api/client/store/orders/{$orderId}/payments/card")
+            ->assertOk()
+            ->assertJsonPath('checkout_url', 'https://www.mercadopago.com.pe/checkout/v1/redirect?pref_id=preference-123');
+        Http::assertSentCount(1);
+
+        $this->actingAs($clientUser)->withHeader('Accept', 'application/json')->post("/api/client/store/orders/{$orderId}/receipt", [
+            'file' => UploadedFile::fake()->create('card-proof.pdf', 100, 'application/pdf'),
+        ])->assertUnprocessable()->assertJsonValidationErrors(['file']);
+        $this->assertDatabaseHas('store_orders', ['id' => $orderId, 'payment_status' => 'pendiente']);
+
+        $reference = StoreOrder::findOrFail($orderId)->provider_reference;
+        Http::fake([
+            'https://api.mercadopago.com/v1/payments/123456' => Http::sequence()
+                ->push([
+                    'external_reference' => $reference,
+                    'transaction_amount' => 999,
+                    'currency_id' => 'PEN',
+                    'status' => 'approved',
+                ])
+                ->push([
+                    'external_reference' => $reference,
+                    'transaction_amount' => 57,
+                    'currency_id' => 'USD',
+                    'status' => 'approved',
+                ])
+                ->push([
+                    'external_reference' => $reference,
+                    'transaction_amount' => 57,
+                    'currency_id' => 'PEN',
+                    'status' => 'approved',
+                ]),
+        ]);
+        $this->postJson('/api/payments/mercadopago/webhook', ['data' => ['id' => '123456']])->assertOk();
+        $this->assertDatabaseHas('store_orders', ['id' => $orderId, 'payment_status' => 'pendiente']);
+        $this->postJson('/api/payments/mercadopago/webhook', ['data' => ['id' => '123456']])->assertOk();
+        $this->assertDatabaseHas('store_orders', ['id' => $orderId, 'payment_status' => 'pendiente']);
+        $this->postJson('/api/payments/mercadopago/webhook', ['data' => ['id' => '123456']])->assertOk();
+        $this->assertDatabaseHas('store_orders', [
+            'id' => $orderId,
+            'payment_status' => 'pagado',
+            'provider_payment_id' => '123456',
+        ]);
+        $this->assertNotNull(StoreOrder::findOrFail($orderId)->paid_at);
     }
 
     public function test_demo_products_are_not_offered_for_public_sale(): void
@@ -609,6 +697,12 @@ class StoreLogisticsTest extends TestCase
 
         $this->actingAs($admin)->patchJson("/api/admin/store/returns/{$returnId}", ['estado' => 'aprobada'])->assertOk();
         $this->patchJson("/api/admin/store/returns/{$returnId}", ['estado' => 'recibida'])->assertOk();
+        $this->patchJson("/api/admin/store/returns/{$returnId}", ['estado' => 'inspeccionada'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['notas_inspeccion']);
+        $this->patchJson("/api/admin/store/returns/{$returnId}", ['estado' => 'inspeccionada', 'notas_inspeccion' => 'ok'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['notas_inspeccion']);
         $this->patchJson("/api/admin/store/returns/{$returnId}", ['estado' => 'inspeccionada', 'notas_inspeccion' => 'Producto en buen estado.'])->assertOk();
         $this->assertDatabaseHas('store_products', ['id' => $product->id, 'stock' => 1]);
         $this->assertDatabaseHas('store_products', ['id' => $secondProduct->id, 'stock' => 3]);
@@ -622,5 +716,9 @@ class StoreLogisticsTest extends TestCase
             'cantidad' => 1,
             'motivo' => "Devolución #{$returnId} apta para reventa",
         ]);
+
+        $this->getJson('/api/admin/store')
+            ->assertOk()
+            ->assertJsonPath('metrics.return_resolutions.reventa', 1);
     }
 }

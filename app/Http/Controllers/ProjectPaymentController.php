@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Project;
 use App\Models\ProjectMilestone;
 use App\Models\ProjectPayment;
+use App\Models\StoreOrder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -192,7 +193,37 @@ class ProjectPaymentController extends Controller
                     ->lockForUpdate()
                     ->first();
                 if (! $payment) {
-                    return 'ignored';
+                    $order = StoreOrder::where('provider_reference', $reference)
+                        ->lockForUpdate()
+                        ->first();
+                    if (! $order || $order->payment_method !== 'card' || $order->payment_status !== 'pendiente') {
+                        return 'ignored';
+                    }
+
+                    $providerAmount = isset($providerPayment['transaction_amount'])
+                        ? (int) round((float) $providerPayment['transaction_amount'] * 100)
+                        : -1;
+                    $expectedAmount = (int) round((float) $order->total * 100);
+                    if (($providerPayment['currency_id'] ?? null) !== 'PEN' || $providerAmount !== $expectedAmount) {
+                        return 'mismatch';
+                    }
+
+                    $providerStatus = $providerPayment['status'] ?? null;
+                    if ($providerStatus === 'approved') {
+                        $order->update([
+                            'payment_status' => 'pagado',
+                            'provider_payment_id' => (string) $providerPaymentId,
+                            'paid_at' => now(),
+                            'payment_due_at' => null,
+                        ]);
+                    } elseif (in_array($providerStatus, ['rejected', 'cancelled'], true)) {
+                        $order->update([
+                            'payment_status' => 'rechazado',
+                            'provider_payment_id' => (string) $providerPaymentId,
+                        ]);
+                    }
+
+                    return 'processed';
                 }
 
                 $providerAmount = isset($providerPayment['transaction_amount'])

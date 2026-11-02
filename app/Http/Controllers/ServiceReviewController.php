@@ -8,6 +8,20 @@ use Illuminate\Http\Request;
 
 class ServiceReviewController extends Controller
 {
+    public function publicos()
+    {
+        return response()->json(
+            ServiceReview::query()
+                ->where('aprobada', true)
+                ->whereHas('service', fn ($query) => $query->where('activo', true))
+                ->with('service:id,nombre,slug')
+                ->select(['id', 'servicio_id', 'nombre', 'calificacion', 'titulo', 'comentario', 'created_at'])
+                ->latest()
+                ->limit(6)
+                ->get()
+        );
+    }
+
     public function index(Servicio $servicio)
     {
         return response()->json(
