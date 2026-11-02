@@ -1,45 +1,49 @@
 FROM php:8.2-apache
 
-# Instalar dependencias del sistema y extensiones de PHP requeridas por Laravel
-RUN apt-get update && apt-get install -y \
+# Dependencias del sistema (una sola capa, con limpieza al final)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     libpng-dev \
     libonig-dev \
     libxml2-dev \
     zip \
-    unzip
+    unzip \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get clean && rm -rf /var/lib/apt/lists/*
-
+# Extensiones de PHP requeridas por Laravel
 RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
 
-# Instalar Composer
-COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+# Composer (versión 2 fija, en lugar de "latest")
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+ENV COMPOSER_ALLOW_SUPERUSER=1
 
-# Instalar Node.js para Vite
+# Node.js para compilar los assets de Vite
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs
+    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Directorio de trabajo
 WORKDIR /var/www/html
 
-# Copiar el código del proyecto
+# Copiar el código del proyecto (.dockerignore excluye .env, vendor, etc.)
 COPY . .
 
 # Configurar Apache apuntando a public/
 ENV APACHE_DOCUMENT_ROOT /var/www/html/public
-RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf
-RUN sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf
+RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf \
+    && sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf \
+    && a2enmod rewrite
 
-RUN a2enmod rewrite
-
-# Instalar dependencias de PHP y compilar los assets de frontend
-RUN composer install --no-dev --optimize-autoloader
+# Dependencias de PHP y compilación de assets
+RUN composer install --no-dev --optimize-autoloader --no-interaction
 RUN npm install && npm run build
 
-# Asignar permisos completos a las carpetas de almacenamiento y caché para evitar Error 500
-RUN chmod -R 777 /var/www/html/storage /var/www/html/bootstrap/cache
-RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
+# Carpetas de escritura de Laravel, con permisos mínimos (sin 777)
+RUN mkdir -p storage/app/private storage/app/public storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \
+    && chown -R www-data:www-data storage bootstrap/cache \
+    && chmod -R ug+rwX storage bootstrap/cache
 
 EXPOSE 80
