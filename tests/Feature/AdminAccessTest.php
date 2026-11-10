@@ -23,6 +23,15 @@ class AdminAccessTest extends TestCase
         $this->assertDatabaseHas('leads', ['email' => 'cliente@example.com']);
     }
 
+    public function test_public_lead_submissions_are_rate_limited(): void
+    {
+        foreach (range(1, 5) as $_) {
+            $this->postJson('/api/leads', [])->assertUnprocessable();
+        }
+
+        $this->postJson('/api/leads', [])->assertTooManyRequests();
+    }
+
     public function test_regular_users_cannot_access_admin_routes_or_log_in_to_the_admin_panel(): void
     {
         $user = User::factory()->create();
@@ -95,6 +104,18 @@ class AdminAccessTest extends TestCase
         ])->assertOk()
             ->assertJsonPath('usuario.email', $admin->email)
             ->assertJsonStructure(['token', 'usuario' => ['name', 'email']]);
+    }
+
+    public function test_api_tokens_expire_after_the_configured_lifetime(): void
+    {
+        config(['sanctum.expiration' => 60]);
+        $admin = User::factory()->create(['is_admin' => true]);
+        $token = $admin->createToken('test')->plainTextToken;
+        $admin->tokens()->firstOrFail()
+            ->forceFill(['created_at' => now()->subMinutes(61)])
+            ->save();
+
+        $this->withToken($token)->getJson('/api/leads')->assertUnauthorized();
     }
 
     public function test_admin_password_command_promotes_account_rotates_password_and_revokes_tokens(): void

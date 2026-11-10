@@ -100,9 +100,21 @@ class DatabaseSeeder extends Seeder
             if ($changes) $service->update($changes);
         }
 
-        PortfolioProject::firstOrCreate(
+        $digitalPymeDetails = [
+            'descripcion_larga' => 'Sitio web propio de DigitalPyme para presentar servicios, orientar a negocios y recibir solicitudes de cotización.',
+            'desafio' => 'Reunir en un mismo sitio la presentación de servicios, la atención de consultas y las herramientas que acompañan a los clientes durante sus proyectos.',
+            'solucion' => 'Se desarrolló un sitio adaptable con catálogo de servicios, formulario y cotizador, agenda, reseñas y un portal para consultar proyectos, entregas, documentos y pagos.',
+            'entregables' => [
+                'Sitio web adaptable con catálogo de servicios y proyectos.',
+                'Formulario de contacto, cotizador y agenda de reuniones.',
+                'Portal de clientes con seguimiento de proyectos, entregas, documentos y pagos.',
+            ],
+            'tecnologias' => ['React', 'TypeScript', 'Laravel', 'API REST'],
+        ];
+        $digitalPymeProject = PortfolioProject::firstOrCreate(
             ['nombre' => 'DigitalPyme'],
             [
+                ...$digitalPymeDetails,
                 'categoria' => 'Proyecto propio',
                 'resultado' => 'Catálogo de servicios y solicitudes de cotización',
                 'imagen' => '/portfolio/digitalpyme-catalogo.svg',
@@ -112,6 +124,91 @@ class DatabaseSeeder extends Seeder
                 'orden' => 1,
             ],
         );
+
+        foreach ($digitalPymeDetails as $field => $value) {
+            if ($digitalPymeProject->{$field} === null) {
+                $digitalPymeProject->{$field} = $value;
+            }
+        }
+        if ($digitalPymeProject->isDirty()) {
+            $digitalPymeProject->save();
+        }
+
+        $sampleProjects = [
+            [
+                'nombre' => 'Mercado Raíz',
+                'categoria' => 'Concepto de muestra',
+                'resultado' => 'Concepto visual de tienda digital con catálogo y compra sencilla.',
+                'descripcion_larga' => 'Ejercicio conceptual para ilustrar cómo podría organizarse una tienda en línea de productos naturales. No representa un negocio ni un proyecto entregado a un cliente.',
+                'desafio' => 'Concepto: presentar distintas categorías de productos y hacer más claro el recorrido desde el catálogo hasta la consulta o compra.',
+                'solucion' => 'Maqueta visual de una tienda adaptable con categorías, tarjetas de producto y un resumen del carrito.',
+                'entregables' => ['Maqueta de inicio de tienda.', 'Diseño conceptual de catálogo y tarjetas de producto.', 'Vista conceptual del carrito.'],
+                'tecnologias' => ['Diseño conceptual', 'Comercio electrónico'],
+                'imagen' => '/portfolio/concepto-mercado-raiz.jpg',
+                'imagen_alt' => 'Fotografía ilustrativa de productos frescos en un mercado. Imagen de Unsplash para un concepto de muestra.',
+                'orden' => 2,
+            ],
+            [
+                'nombre' => 'Casa Nómada',
+                'categoria' => 'Concepto de muestra',
+                'resultado' => 'Concepto visual de una página para alojamientos y reservas.',
+                'descripcion_larga' => 'Ejercicio conceptual para mostrar una página de alojamientos con información clara y una llamada a consultar disponibilidad. No representa un negocio ni un proyecto entregado a un cliente.',
+                'desafio' => 'Concepto: facilitar que una persona conozca un alojamiento, explore sus características y sepa cómo consultar fechas.',
+                'solucion' => 'Maqueta visual adaptable con imagen principal, información del alojamiento, características y acceso a consulta.',
+                'entregables' => ['Maqueta de página de alojamiento.', 'Diseño conceptual de características y galería.', 'Llamada visual a consultar disponibilidad.'],
+                'tecnologias' => ['Diseño conceptual', 'Diseño web adaptable'],
+                'imagen' => '/portfolio/concepto-casa-nomada.jpg',
+                'imagen_alt' => 'Fotografía ilustrativa de una cabaña junto a un bosque. Imagen de Unsplash para un concepto de muestra.',
+                'orden' => 3,
+            ],
+            [
+                'nombre' => 'Estudio Lumen',
+                'categoria' => 'Concepto de muestra',
+                'resultado' => 'Concepto visual de una web para servicios profesionales.',
+                'descripcion_larga' => 'Ejercicio conceptual para presentar servicios profesionales, explicar un proceso de trabajo y facilitar solicitudes de consulta. No representa un negocio ni un proyecto entregado a un cliente.',
+                'desafio' => 'Concepto: organizar los servicios y explicar una propuesta profesional de forma directa.',
+                'solucion' => 'Maqueta visual adaptable con presentación, tarjetas de servicios y un formulario conceptual de contacto.',
+                'entregables' => ['Maqueta de página de servicios.', 'Diseño conceptual de tarjetas de servicio.', 'Llamada visual a solicitar una consulta.'],
+                'tecnologias' => ['Diseño conceptual', 'Diseño web adaptable'],
+                'imagen' => '/portfolio/concepto-estudio-lumen.jpg',
+                'imagen_alt' => 'Fotografía ilustrativa de un espacio de trabajo moderno. Imagen de Unsplash para un concepto de muestra.',
+                'orden' => 4,
+            ],
+        ];
+
+        $legacySampleImages = [
+            'Mercado Raíz' => [
+                '/portfolio/concepto-mercado-raiz.svg',
+                'Maqueta ilustrativa de una tienda de productos naturales, concepto de muestra.',
+            ],
+            'Casa Nómada' => [
+                '/portfolio/concepto-casa-nomada.svg',
+                'Maqueta ilustrativa de una página de alojamiento, concepto de muestra.',
+            ],
+            'Estudio Lumen' => [
+                '/portfolio/concepto-estudio-lumen.svg',
+                'Maqueta ilustrativa de una web de servicios profesionales, concepto de muestra.',
+            ],
+        ];
+
+        foreach ($sampleProjects as $project) {
+            $sampleProject = PortfolioProject::firstOrCreate(
+                ['nombre' => $project['nombre']],
+                [
+                    ...$project,
+                    'activo' => true,
+                ],
+            );
+
+            [$legacyImage, $legacyAlt] = $legacySampleImages[$project['nombre']];
+            if ($sampleProject->imagen === $legacyImage) {
+                $sampleProject->imagen = $project['imagen'];
+                if ($sampleProject->imagen_alt === $legacyAlt) {
+                    $sampleProject->imagen_alt = $project['imagen_alt'];
+                }
+                $sampleProject->save();
+            }
+        }
 
         $this->call(StoreDemoSeeder::class);
     }

@@ -7,7 +7,6 @@ use App\Models\AgendaReservation;
 use App\Models\AgendaSlot;
 use App\Models\Cotizacion;
 use App\Models\Lead;
-use App\Models\Project;
 use App\Models\ProjectMonthlyCapacity;
 use App\Models\User;
 use Carbon\CarbonImmutable;
@@ -172,6 +171,7 @@ class AgendaInventoryTest extends TestCase
     {
         return $lead->cotizaciones()->create([
             'servicio' => 'Página web',
+            'descripcion' => 'Diseño y desarrollo del sitio web.',
             'monto' => 1800,
         ]);
     }

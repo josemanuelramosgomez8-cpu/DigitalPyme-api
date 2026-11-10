@@ -6,6 +6,9 @@ use App\Models\Project;
 use App\Models\ProjectMilestone;
 use App\Models\ProjectPayment;
 use App\Models\StoreOrder;
+use App\Support\PaymentReceiptNotifier;
+use App\Support\PaymentReceiptPdf;
+use App\Support\StoreOrderNotifier;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -162,7 +165,11 @@ class ProjectPaymentController extends Controller
         }
     }
 
-    public function mercadoPagoWebhook(Request $request)
+    public function mercadoPagoWebhook(
+        Request $request,
+        PaymentReceiptNotifier $receiptNotifier,
+        StoreOrderNotifier $storeOrderNotifier,
+    )
     {
         $providerPaymentId = $request->input('data.id') ?? $request->query('id');
         if (! is_string($providerPaymentId) && ! is_numeric($providerPaymentId)) {
@@ -263,6 +270,24 @@ class ProjectPaymentController extends Controller
                 ]);
             }
 
+            if ($result === 'processed') {
+                $payment = ProjectPayment::where('reference', $reference)
+                    ->where('status', 'pagado')
+                    ->first();
+
+                if ($payment) {
+                    $receiptNotifier->send($payment);
+                } else {
+                    $order = StoreOrder::where('provider_reference', $reference)
+                        ->where('payment_status', 'pagado')
+                        ->first();
+
+                    if ($order) {
+                        $storeOrderNotifier->send($order);
+                    }
+                }
+            }
+
             return response()->json(['mensaje' => 'Notificación recibida.']);
         } catch (Throwable $exception) {
             Log::error('No se pudo verificar una notificación de Mercado Pago.', [
@@ -294,7 +319,7 @@ class ProjectPaymentController extends Controller
         );
     }
 
-    public function adminUpdateStatus(Request $request, ProjectPayment $payment)
+    public function adminUpdateStatus(Request $request, ProjectPayment $payment, PaymentReceiptNotifier $receiptNotifier)
     {
         $datos = $request->validate([
             'status' => ['required', Rule::in(['pagado', 'rechazado'])],
@@ -323,7 +348,27 @@ class ProjectPaymentController extends Controller
             return $lockedPayment->refresh();
         });
 
-        return response()->json($updatedPayment);
+        $receiptEmailSent = $datos['status'] === 'pagado'
+            ? $receiptNotifier->send($updatedPayment)
+            : null;
+
+        return response()->json([
+            ...$updatedPayment->toArray(),
+            ...($receiptEmailSent === null ? [] : ['receipt_email_sent' => $receiptEmailSent]),
+        ]);
+    }
+
+    public function clientReceipt(Request $request, Project $project, ProjectPayment $payment)
+    {
+        $this->ensureClientOwnsProject($request, $project);
+        abort_unless($payment->project_id === $project->id && $payment->status === 'pagado' && $payment->paid_at, 404);
+
+        $pdf = PaymentReceiptPdf::render($payment);
+        $filename = 'recibo-digitalpyme-'.str_pad((string) $payment->id, 8, '0', STR_PAD_LEFT).'.pdf';
+
+        return response($pdf)
+            ->header('Content-Type', 'application/pdf')
+            ->header('Content-Disposition', 'attachment; filename="'.$filename.'"');
     }
 
     private function createPayment(Project $project, ?int $milestoneId, string $method): ProjectPayment

@@ -100,6 +100,7 @@ class ClientProjectTest extends TestCase
         $lead = $this->createLead(['email' => null, 'telefono' => '999111222']);
         $quote = $lead->cotizaciones()->create([
             'servicio' => 'Página web',
+            'descripcion' => 'Diseño y desarrollo del sitio web.',
             'monto' => 1800,
         ]);
 

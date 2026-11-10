@@ -46,4 +46,8 @@ RUN mkdir -p storage/app/private storage/app/public storage/framework/cache/data
     && chown -R www-data:www-data storage bootstrap/cache \
     && chmod -R ug+rwX storage bootstrap/cache
 
+ENV UPLOADS_PATH=/var/www/html/storage/app/private
+
+RUN ln -s /var/www/html/storage/app/public /var/www/html/public/storage
+
 EXPOSE 80

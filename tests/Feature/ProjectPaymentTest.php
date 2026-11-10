@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Mail\PagoConfirmado;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\Project;
@@ -10,6 +11,7 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -40,9 +42,24 @@ class ProjectPaymentTest extends TestCase
             ->assertJsonPath('payment.status', 'pendiente');
     }
 
+    public function test_client_cannot_pay_until_the_quote_is_accepted(): void
+    {
+        [$user, $project] = $this->clientProject();
+        $project->cotizacion->update(['estado' => 'enviada']);
+
+        $this->actingAs($user)
+            ->postJson("/api/client/projects/{$project->id}/payments/transfers")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['project']);
+
+        $this->assertDatabaseCount('project_payments', 0);
+    }
+
     public function test_client_can_submit_a_private_transfer_receipt_for_admin_review(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
+        Mail::fake();
+        config(['mail.default' => 'smtp']);
         [$user, $project] = $this->clientProject();
         $payment = $this->actingAs($user)
             ->postJson("/api/client/projects/{$project->id}/payments/transfers")
@@ -61,22 +78,35 @@ class ProjectPaymentTest extends TestCase
             'status' => 'comprobante_enviado',
         ]);
         $document = ProjectDocument::where('payment_id', $payment['id'])->firstOrFail();
-        Storage::disk('local')->assertExists($document->file_path);
+        Storage::disk('uploads')->assertExists($document->file_path);
 
         $admin = User::factory()->create(['is_admin' => true]);
         $this->actingAs($admin)
             ->patchJson("/api/admin/payments/{$payment['id']}", ['status' => 'pagado'])
             ->assertOk()
-            ->assertJsonPath('status', 'pagado');
+            ->assertJsonPath('status', 'pagado')
+            ->assertJsonPath('receipt_email_sent', true);
 
         $this->actingAs($admin)
             ->patchJson("/api/admin/payments/{$payment['id']}", ['status' => 'rechazado'])
             ->assertUnprocessable();
+
+        Mail::assertSent(PagoConfirmado::class, fn (PagoConfirmado $mail) => $mail->payment->id === $payment['id']);
+        [$otherUser, $otherProject] = $this->clientProject('other@example.com');
+        $this->actingAs($otherUser)
+            ->get("/api/client/projects/{$otherProject->id}/payments/{$payment['id']}/receipt")
+            ->assertNotFound();
+
+        $receiptResponse = $this->actingAs($user)
+            ->get("/api/client/projects/{$project->id}/payments/{$payment['id']}/receipt");
+        $receiptResponse->assertOk()
+            ->assertHeader('Content-Type', 'application/pdf');
+        $this->assertStringStartsWith('%PDF-', $receiptResponse->getContent());
     }
 
     public function test_client_can_submit_yape_plin_payment_with_receipt_for_admin_review(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
         config([
             'services.yape_plin.enabled' => true,
             'services.yape_plin.phone' => '999888777',
@@ -172,6 +202,8 @@ class ProjectPaymentTest extends TestCase
 
     public function test_card_checkout_is_unavailable_without_credentials_and_verifies_provider_payment(): void
     {
+        Mail::fake();
+        config(['mail.default' => 'smtp']);
         [$user, $project] = $this->clientProject();
 
         $this->actingAs($user)
@@ -213,6 +245,12 @@ class ProjectPaymentTest extends TestCase
             'status' => 'pagado',
             'provider_reference' => '987654',
         ]);
+        Mail::assertSent(PagoConfirmado::class, fn (PagoConfirmado $mail) => $mail->payment->id === $payment['id']);
+        $receiptResponse = $this->actingAs($user)
+            ->get("/api/client/projects/{$project->id}/payments/{$payment['id']}/receipt");
+        $receiptResponse->assertOk()
+            ->assertHeader('Content-Type', 'application/pdf');
+        $this->assertStringStartsWith('%PDF-', $receiptResponse->getContent());
     }
 
     public function test_webhook_does_not_mark_a_payment_paid_when_amount_or_currency_does_not_match(): void

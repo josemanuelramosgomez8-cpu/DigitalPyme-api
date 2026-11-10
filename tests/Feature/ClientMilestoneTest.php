@@ -124,11 +124,11 @@ class ClientMilestoneTest extends TestCase
 
     public function test_client_can_download_a_payment_receipt_attached_to_its_project(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
         [$user, $project] = $this->clientProject('receipt@example.com');
         $path = UploadedFile::fake()
             ->createWithContent('comprobante.pdf', '%PDF-1.4 receipt')
-            ->store("projects/{$project->id}", 'local');
+            ->store("projects/{$project->id}", 'uploads');
         $document = ProjectDocument::create([
             'project_id' => $project->id,
             'original_name' => 'comprobante.pdf',

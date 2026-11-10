@@ -5,18 +5,31 @@ namespace Tests\Feature;
 use App\Models\Client;
 use App\Models\StockMovement;
 use App\Models\StoreOrder;
+use App\Models\StoreCoupon;
 use App\Models\StoreProduct;
 use App\Models\StoreReturn;
 use App\Models\User;
+use App\Mail\StoreOrderConfirmation;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class StoreLogisticsTest extends TestCase
 {
     use RefreshDatabase;
+
+    private function checkoutIdentity(): array
+    {
+        return [
+            'telefono' => '999888777',
+            'tipo_comprobante' => 'boleta',
+            'tipo_documento' => 'dni',
+            'numero_documento' => '12345678',
+        ];
+    }
 
     protected function setUp(): void
     {
@@ -86,13 +99,15 @@ class StoreLogisticsTest extends TestCase
 
         $this->actingAs($clientUser)->postJson('/api/client/store/orders', [
             'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
             'metodo_envio' => 'express',
             'payment_method' => 'bank_transfer',
             'ubicacion_entrega' => 'lIMA',
             'direccion_entrega' => 'Av. Demo 123',
         ])->assertCreated()
             ->assertJsonPath('costo_envio', '16.00')
-            ->assertJsonPath('total', '66.00');
+            ->assertJsonPath('igv_amount', '11.88')
+            ->assertJsonPath('total', '77.88');
     }
 
     public function test_store_only_offers_configured_manual_payment_methods(): void
@@ -106,6 +121,7 @@ class StoreLogisticsTest extends TestCase
         $this->getJson('/api/store/payment-options')
             ->assertOk()
             ->assertJsonPath('card_enabled', false)
+            ->assertJsonPath('card_environment', 'sandbox')
             ->assertJsonPath('bank_transfer.enabled', false)
             ->assertJsonPath('yape_plin.enabled', false);
 
@@ -120,6 +136,7 @@ class StoreLogisticsTest extends TestCase
 
         $this->actingAs($user)->postJson('/api/client/store/orders', [
             'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
             'metodo_envio' => 'estandar',
             'payment_method' => 'yape_plin',
             'ubicacion_entrega' => 'Lima',
@@ -130,11 +147,53 @@ class StoreLogisticsTest extends TestCase
         $this->assertDatabaseCount('store_orders', 0);
     }
 
+    public function test_only_administrators_can_manage_store_coupons(): void
+    {
+        $payload = [
+            'code' => 'PRUEBA15',
+            'discount_type' => 'percentage',
+            'discount_value' => 15,
+            'active' => true,
+        ];
+
+        $this->postJson('/api/admin/store/coupons', $payload)->assertUnauthorized();
+
+        $admin = User::factory()->create(['is_admin' => true]);
+        $this->actingAs($admin)
+            ->postJson('/api/admin/store/coupons', [...$payload, 'discount_value' => 100.01])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['discount_value']);
+
+        $couponId = $this->actingAs($admin)
+            ->postJson('/api/admin/store/coupons', $payload)
+            ->assertCreated()
+            ->assertJsonPath('code', 'PRUEBA15')
+            ->json('id');
+
+        $this->putJson("/api/admin/store/coupons/{$couponId}", [
+            ...$payload,
+            'discount_type' => 'fixed',
+            'discount_value' => 20,
+            'active' => false,
+        ])->assertOk()
+            ->assertJsonPath('discount_type', 'fixed')
+            ->assertJsonPath('active', false);
+
+        $this->getJson('/api/admin/store')
+            ->assertOk()
+            ->assertJsonPath('coupons.0.code', 'PRUEBA15');
+        $this->deleteJson("/api/admin/store/coupons/{$couponId}")
+            ->assertOk();
+        $this->assertDatabaseMissing('store_coupons', ['id' => $couponId]);
+    }
+
     public function test_store_card_checkout_is_confirmed_only_after_mercado_pago_webhook_matches_amount_and_currency(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
+        Mail::fake();
         config([
             'services.mercadopago.access_token' => 'test-access-token',
+            'services.mercadopago.environment' => 'sandbox',
             'services.mercadopago.return_url' => 'https://digitalpyme.test',
             'services.mercadopago.webhook_url' => 'https://api.digitalpyme.test/api/payments/mercadopago/webhook',
         ]);
@@ -142,6 +201,7 @@ class StoreLogisticsTest extends TestCase
             'https://api.mercadopago.com/checkout/preferences' => Http::response([
                 'id' => 'preference-123',
                 'init_point' => 'https://www.mercadopago.com.pe/checkout/v1/redirect?pref_id=preference-123',
+                'sandbox_init_point' => 'https://sandbox.mercadopago.com.pe/checkout/v1/redirect?pref_id=preference-123',
             ], 201),
         ]);
 
@@ -156,6 +216,7 @@ class StoreLogisticsTest extends TestCase
 
         $orderId = $this->actingAs($clientUser)->postJson('/api/client/store/orders', [
             'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
             'metodo_envio' => 'estandar',
             'payment_method' => 'card',
             'ubicacion_entrega' => 'Lima',
@@ -170,10 +231,10 @@ class StoreLogisticsTest extends TestCase
 
         $this->postJson("/api/client/store/orders/{$orderId}/payments/card")
             ->assertCreated()
-            ->assertJsonPath('checkout_url', 'https://www.mercadopago.com.pe/checkout/v1/redirect?pref_id=preference-123');
+            ->assertJsonPath('checkout_url', 'https://sandbox.mercadopago.com.pe/checkout/v1/redirect?pref_id=preference-123');
         $this->postJson("/api/client/store/orders/{$orderId}/payments/card")
             ->assertOk()
-            ->assertJsonPath('checkout_url', 'https://www.mercadopago.com.pe/checkout/v1/redirect?pref_id=preference-123');
+            ->assertJsonPath('checkout_url', 'https://sandbox.mercadopago.com.pe/checkout/v1/redirect?pref_id=preference-123');
         Http::assertSentCount(1);
 
         $this->actingAs($clientUser)->withHeader('Accept', 'application/json')->post("/api/client/store/orders/{$orderId}/receipt", [
@@ -192,13 +253,13 @@ class StoreLogisticsTest extends TestCase
                 ])
                 ->push([
                     'external_reference' => $reference,
-                    'transaction_amount' => 57,
+                    'transaction_amount' => 67.26,
                     'currency_id' => 'USD',
                     'status' => 'approved',
                 ])
                 ->push([
                     'external_reference' => $reference,
-                    'transaction_amount' => 57,
+                    'transaction_amount' => 67.26,
                     'currency_id' => 'PEN',
                     'status' => 'approved',
                 ]),
@@ -214,6 +275,8 @@ class StoreLogisticsTest extends TestCase
             'provider_payment_id' => '123456',
         ]);
         $this->assertNotNull(StoreOrder::findOrFail($orderId)->paid_at);
+        Mail::assertSent(StoreOrderConfirmation::class, 2);
+        Mail::assertSent(StoreOrderConfirmation::class, fn (StoreOrderConfirmation $mail) => $mail->order->payment_status === 'pagado');
     }
 
     public function test_demo_products_are_not_offered_for_public_sale(): void
@@ -236,7 +299,7 @@ class StoreLogisticsTest extends TestCase
 
     public function test_admin_can_upload_public_product_images_without_exposing_storage_paths(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
         $admin = User::factory()->create(['is_admin' => true]);
         $product = StoreProduct::create([
             'sku' => 'PHOTO-01',
@@ -389,6 +452,7 @@ class StoreLogisticsTest extends TestCase
         $client = Client::create(['user_id' => $user->id, 'nombre' => $user->name]);
         $this->actingAs($user)->postJson('/api/client/store/orders', [
             'items' => [['product_id' => $productId, 'cantidad' => 2]],
+            ...$this->checkoutIdentity(),
             'metodo_envio' => 'estandar',
             'payment_method' => 'bank_transfer',
             'ubicacion_entrega' => 'Lima',
@@ -405,7 +469,7 @@ class StoreLogisticsTest extends TestCase
             'tipo' => 'salida',
             'cantidad' => 2,
         ]);
-        $this->assertDatabaseHas('store_orders', ['client_id' => $client->id, 'total' => 240]);
+        $this->assertDatabaseHas('store_orders', ['client_id' => $client->id, 'total' => 283.2]);
     }
 
     public function test_checkout_calculates_decimal_prices_and_shipping_threshold_in_cents(): void
@@ -426,6 +490,7 @@ class StoreLogisticsTest extends TestCase
 
         $payload = [
             'items' => [['product_id' => $product->id, 'cantidad' => 3]],
+            ...$this->checkoutIdentity(),
             'metodo_envio' => 'estandar',
             'payment_method' => 'bank_transfer',
             'ubicacion_entrega' => 'Lima',
@@ -435,7 +500,8 @@ class StoreLogisticsTest extends TestCase
             ->assertCreated()
             ->assertJsonPath('subtotal', '59.97')
             ->assertJsonPath('costo_envio', '12.00')
-            ->assertJsonPath('total', '71.97')
+            ->assertJsonPath('igv_amount', '12.95')
+            ->assertJsonPath('total', '84.92')
             ->assertJsonPath('items.0.precio_unitario', '19.99')
             ->assertJsonPath('items.0.subtotal', '59.97');
 
@@ -447,12 +513,14 @@ class StoreLogisticsTest extends TestCase
             ->assertCreated()
             ->assertJsonPath('subtotal', '59.97')
             ->assertJsonPath('costo_envio', '0.00')
-            ->assertJsonPath('total', '59.97');
+            ->assertJsonPath('igv_amount', '10.79')
+            ->assertJsonPath('total', '70.76');
     }
 
     public function test_manual_store_payment_requires_receipt_review_before_fulfillment(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
+        Mail::fake();
         $admin = User::factory()->create(['is_admin' => true]);
         $clientUser = User::factory()->create(['is_client' => true]);
         $client = Client::create(['user_id' => $clientUser->id, 'nombre' => $clientUser->name]);
@@ -465,6 +533,7 @@ class StoreLogisticsTest extends TestCase
 
         $orderId = $this->actingAs($clientUser)->postJson('/api/client/store/orders', [
             'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
             'metodo_envio' => 'estandar',
             'payment_method' => 'yape_plin',
             'ubicacion_entrega' => 'Lima',
@@ -512,7 +581,11 @@ class StoreLogisticsTest extends TestCase
         ])->assertCreated();
         $this->actingAs($admin)->patchJson("/api/admin/store/orders/{$orderId}/payment", [
             'payment_status' => 'pagado',
-        ])->assertOk()->assertJsonPath('payment_status', 'pagado');
+        ])->assertOk()
+            ->assertJsonPath('payment_status', 'pagado')
+            ->assertJsonPath('receipt_email_sent', false);
+        Mail::assertSent(StoreOrderConfirmation::class, 2);
+        Mail::assertSent(StoreOrderConfirmation::class, fn (StoreOrderConfirmation $mail) => $mail->order->payment_status === 'pagado');
 
         $this->getJson('/api/admin/store')
             ->assertOk()
@@ -539,6 +612,7 @@ class StoreLogisticsTest extends TestCase
 
         $orderId = $this->actingAs($clientUser)->postJson('/api/client/store/orders', [
             'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
             'metodo_envio' => 'estandar',
             'payment_method' => 'bank_transfer',
             'ubicacion_entrega' => 'Lima',
@@ -579,6 +653,90 @@ class StoreLogisticsTest extends TestCase
             ->assertJsonValidationErrors(['precio']);
     }
 
+    public function test_checkout_applies_percentage_coupon_saves_invoice_data_and_emails_order_summary(): void
+    {
+        Mail::fake();
+        config(['mail.default' => 'smtp']);
+
+        $clientUser = User::factory()->create(['is_client' => true]);
+        $client = Client::create(['user_id' => $clientUser->id, 'nombre' => $clientUser->name]);
+        $product = StoreProduct::create([
+            'sku' => 'COUPON-01',
+            'nombre' => 'Producto con cupón',
+            'precio' => 100,
+            'stock' => 2,
+        ]);
+        StoreCoupon::create([
+            'code' => 'BIENVENIDA10',
+            'discount_type' => 'percentage',
+            'discount_value' => 10,
+            'active' => true,
+        ]);
+
+        $this->actingAs($clientUser)->postJson('/api/client/store/coupons/validate', [
+            'code' => 'bienvenida10',
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+        ])->assertOk()
+            ->assertJsonPath('code', 'BIENVENIDA10')
+            ->assertJsonPath('discount_amount', '10.00');
+
+        $response = $this->actingAs($clientUser)->postJson('/api/client/store/orders', [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
+            'tipo_comprobante' => 'factura',
+            'tipo_documento' => 'ruc',
+            'numero_documento' => '20123456789',
+            'empresa_facturacion' => 'Empresa de prueba S.A.C.',
+            'coupon_code' => 'bienvenida10',
+            'metodo_envio' => 'estandar',
+            'payment_method' => 'bank_transfer',
+            'ubicacion_entrega' => 'Lima',
+            'direccion_entrega' => 'Av. Central 123',
+        ])->assertCreated()
+            ->assertJsonPath('discount_amount', '10.00')
+            ->assertJsonPath('coupon_code', 'BIENVENIDA10')
+            ->assertJsonPath('igv_amount', '18.36')
+            ->assertJsonPath('total', '120.36')
+            ->assertJsonPath('tipo_comprobante', 'factura')
+            ->assertJsonPath('numero_documento', '20123456789')
+            ->assertJsonPath('email_enviado', true);
+
+        $this->assertDatabaseHas('clients', [
+            'id' => $client->id,
+            'telefono' => '999888777',
+            'tipo_documento' => 'ruc',
+            'numero_documento' => '20123456789',
+            'tipo_comprobante' => 'factura',
+        ]);
+        Mail::assertSent(StoreOrderConfirmation::class, fn (StoreOrderConfirmation $mail) => $mail->order->email_cliente === $clientUser->email);
+    }
+
+    public function test_invoice_checkout_requires_a_matching_document_number_and_ruc_for_invoice(): void
+    {
+        $user = User::factory()->create(['is_client' => true]);
+        Client::create(['user_id' => $user->id, 'nombre' => $user->name]);
+        $product = StoreProduct::create([
+            'sku' => 'INVOICE-VALIDATION',
+            'nombre' => 'Producto para validar factura',
+            'precio' => 20,
+            'stock' => 1,
+        ]);
+
+        $this->actingAs($user)->postJson('/api/client/store/orders', [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
+            'tipo_comprobante' => 'factura',
+            'empresa_facturacion' => 'Empresa de prueba S.A.C.',
+            'metodo_envio' => 'estandar',
+            'payment_method' => 'bank_transfer',
+            'ubicacion_entrega' => 'Lima',
+            'direccion_entrega' => 'Av. Central 123',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['tipo_documento']);
+
+        $this->assertDatabaseCount('store_orders', 0);
+    }
+
     public function test_checkout_locks_products_in_id_order_without_changing_requested_item_order(): void
     {
         $firstProduct = StoreProduct::create([
@@ -601,6 +759,7 @@ class StoreLogisticsTest extends TestCase
                 ['product_id' => $secondProduct->id, 'cantidad' => 1],
                 ['product_id' => $firstProduct->id, 'cantidad' => 2],
             ],
+            ...$this->checkoutIdentity(),
             'metodo_envio' => 'estandar',
             'payment_method' => 'bank_transfer',
             'ubicacion_entrega' => 'Lima',
@@ -628,6 +787,7 @@ class StoreLogisticsTest extends TestCase
 
         $payload = [
             'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
             'metodo_envio' => 'same_day',
             'payment_method' => 'bank_transfer',
             'ubicacion_entrega' => 'Arequipa',
@@ -673,13 +833,14 @@ class StoreLogisticsTest extends TestCase
                 ['product_id' => $secondProduct->id, 'cantidad' => 1],
                 ['product_id' => $product->id, 'cantidad' => 1],
             ],
+            ...$this->checkoutIdentity(),
             'metodo_envio' => 'estandar',
             'payment_method' => 'bank_transfer',
             'ubicacion_entrega' => 'Lima',
             'direccion_entrega' => 'Av. Demo 10',
         ])->assertCreated()->json('id');
 
-        Storage::fake('local');
+        Storage::fake('uploads');
         $this->actingAs($clientUser)->post("/api/client/store/orders/{$orderId}/receipt", [
             'file' => UploadedFile::fake()->create('comprobante.pdf', 100, 'application/pdf'),
         ])->assertCreated();

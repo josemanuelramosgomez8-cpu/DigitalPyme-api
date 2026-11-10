@@ -14,11 +14,13 @@ use App\Http\Controllers\ProjectDocumentController;
 use App\Http\Controllers\ProjectMessageController;
 use App\Http\Controllers\ProjectPaymentController;
 use App\Http\Controllers\PublicQuoteController;
-use App\Http\Controllers\ServicioController;
-use App\Http\Controllers\SiteSettingsController;
+use App\Http\Controllers\PublicQuoteVerificationController;
 use App\Http\Controllers\ServiceCategoryController;
 use App\Http\Controllers\ServiceReviewController;
+use App\Http\Controllers\ServicioController;
+use App\Http\Controllers\SiteSettingsController;
 use App\Http\Controllers\StoreLogisticsController;
+use App\Http\Controllers\StoreCouponController;
 use App\Http\Controllers\TestimonioController;
 use App\Http\Middleware\EnsureAdmin;
 use App\Http\Middleware\EnsureClient;
@@ -26,7 +28,9 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 // Público
-Route::post('/leads', [LeadController::class, 'store']);
+Route::post('/leads', [LeadController::class, 'store'])->middleware('throttle:5,1');
+Route::post('/propuestas/codigo', [PublicQuoteVerificationController::class, 'sendCode'])->middleware('throttle:3,1');
+Route::post('/propuestas/verificar-codigo', [PublicQuoteVerificationController::class, 'verifyCode'])->middleware('throttle:5,1');
 Route::post('/propuestas', [PublicQuoteController::class, 'store'])->middleware('throttle:5,1');
 Route::get('/servicios', [ServicioController::class, 'publicos']);
 Route::get('/servicios/{slug}', [ServicioController::class, 'show'])->where('slug', '[a-z0-9-]+');
@@ -43,6 +47,8 @@ Route::post('/agenda/reservas', [AgendaController::class, 'reserve'])->middlewar
 Route::post('/payments/mercadopago/webhook', [ProjectPaymentController::class, 'mercadoPagoWebhook'])->middleware('throttle:60,1');
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:5,1');
 Route::post('/client/login', [AuthController::class, 'clientLogin'])->middleware('throttle:5,1');
+Route::post('/client/register', [ClientController::class, 'register'])->middleware('throttle:5,1');
+Route::post('/password/reset', [AuthController::class, 'resetPassword'])->middleware('throttle:5,1');
 Route::get('/store/products', [StoreLogisticsController::class, 'publicProducts']);
 Route::get('/store/products/{storeProduct}/image', [StoreLogisticsController::class, 'publicProductImage']);
 Route::get('/store/shipping-options', [StoreLogisticsController::class, 'shippingOptions']);
@@ -57,6 +63,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/admin/dashboard', [AdminDashboardController::class, 'show']);
         Route::get('/admin/site-settings', [SiteSettingsController::class, 'adminShow']);
         Route::get('/admin/store', [StoreLogisticsController::class, 'adminIndex']);
+        Route::post('/admin/store/coupons', [StoreCouponController::class, 'store']);
+        Route::put('/admin/store/coupons/{storeCoupon}', [StoreCouponController::class, 'update']);
+        Route::delete('/admin/store/coupons/{storeCoupon}', [StoreCouponController::class, 'destroy']);
         Route::post('/admin/store/products', [StoreLogisticsController::class, 'storeProduct']);
         Route::put('/admin/store/products/{storeProduct}', [StoreLogisticsController::class, 'updateProduct']);
         Route::post('/admin/store/products/{storeProduct}/image', [StoreLogisticsController::class, 'uploadProductImage']);
@@ -72,10 +81,16 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::patch('/leads/{lead}', [LeadController::class, 'update']);
         Route::post('/leads/{lead}/client', [ClientController::class, 'convertLead']);
         Route::get('/clients', [ClientController::class, 'index']);
+        Route::get('/clients/{client}', [ClientController::class, 'show']);
+        Route::patch('/clients/{client}', [ClientController::class, 'update']);
+        Route::patch('/clients/{client}/status', [ClientController::class, 'updateStatus']);
+        Route::post('/clients/{client}/password', [ClientController::class, 'updatePassword']);
+        Route::post('/clients/{client}/password/reset-link', [ClientController::class, 'sendPasswordResetLink'])->middleware('throttle:3,1');
 
         Route::get('/leads/{lead}/cotizaciones', [CotizacionController::class, 'index']);
         Route::post('/leads/{lead}/cotizaciones', [CotizacionController::class, 'store']);
         Route::patch('/cotizaciones/{cotizacion}', [CotizacionController::class, 'update']);
+        Route::post('/cotizaciones/{cotizacion}/reenviar', [CotizacionController::class, 'resend']);
 
         Route::get('/admin/agenda/horarios', [AgendaController::class, 'adminSlots']);
         Route::post('/admin/agenda/horarios', [AgendaController::class, 'storeSlot']);
@@ -126,7 +141,9 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     Route::middleware(EnsureClient::class)->prefix('client')->group(function () {
-        Route::put('/password', [AuthController::class, 'clientChangePassword']);
+        Route::put('/password', [AuthController::class, 'clientChangePassword'])->name('client.password');
+        Route::get('/profile', [ClientController::class, 'profile']);
+        Route::post('/store/coupons/validate', [StoreCouponController::class, 'validateForCheckout'])->middleware('throttle:10,1');
         Route::get('/store/orders', [StoreLogisticsController::class, 'clientOrders']);
         Route::post('/store/orders', [StoreLogisticsController::class, 'checkout']);
         Route::post('/store/orders/{storeOrder}/payments/card', [StoreLogisticsController::class, 'startCardPayment'])->middleware('throttle:5,1');
@@ -139,6 +156,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/projects/{project}/payments', [ProjectPaymentController::class, 'clientIndex']);
         Route::post('/projects/{project}/payments/transfers', [ProjectPaymentController::class, 'startTransfer']);
         Route::post('/projects/{project}/payments/card', [ProjectPaymentController::class, 'startCardPayment']);
+        Route::get('/projects/{project}/payments/{payment}/receipt', [ProjectPaymentController::class, 'clientReceipt']);
         Route::post('/projects/{project}/payments/{payment}/receipt', [ProjectDocumentController::class, 'clientStorePaymentReceipt']);
         Route::get('/projects/{project}/documents', [ProjectDocumentController::class, 'clientIndex']);
         Route::post('/projects/{project}/documents', [ProjectDocumentController::class, 'clientStore']);

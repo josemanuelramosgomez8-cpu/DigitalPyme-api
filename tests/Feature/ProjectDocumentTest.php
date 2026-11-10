@@ -18,7 +18,7 @@ class ProjectDocumentTest extends TestCase
 
     public function test_client_can_upload_list_and_download_documents_for_its_project(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
         [$clientUser, $project] = $this->clientProject();
         $this->actingAs($clientUser);
 
@@ -31,7 +31,7 @@ class ProjectDocumentTest extends TestCase
             ->assertJsonMissingPath('file_path');
 
         $document = ProjectDocument::firstOrFail();
-        Storage::disk('local')->assertExists($document->file_path);
+        Storage::disk('uploads')->assertExists($document->file_path);
 
         $this->getJson("/api/client/projects/{$project->id}/documents")
             ->assertOk()
@@ -46,7 +46,7 @@ class ProjectDocumentTest extends TestCase
 
     public function test_client_cannot_access_documents_for_another_clients_project(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
         [$clientUser] = $this->clientProject('one@example.com');
         [, $otherProject] = $this->clientProject('two@example.com');
         $this->actingAs($clientUser);
@@ -63,7 +63,7 @@ class ProjectDocumentTest extends TestCase
 
     public function test_client_upload_rejects_unsupported_and_oversized_files(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
         [$clientUser, $project] = $this->clientProject();
         $this->actingAs($clientUser);
 
@@ -82,7 +82,7 @@ class ProjectDocumentTest extends TestCase
 
     public function test_admin_can_upload_download_and_delete_project_documents(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
         $admin = User::factory()->create(['is_admin' => true]);
         [, $project] = $this->clientProject();
         $this->actingAs($admin);
@@ -108,13 +108,13 @@ class ProjectDocumentTest extends TestCase
         $this->deleteJson("/api/admin/projects/{$project->id}/documents/{$documentId}")
             ->assertOk();
 
-        Storage::disk('local')->assertMissing($path);
+        Storage::disk('uploads')->assertMissing($path);
         $this->assertDatabaseMissing('project_documents', ['id' => $documentId]);
     }
 
     public function test_administrator_cannot_access_a_document_under_the_wrong_project(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
         $admin = User::factory()->create(['is_admin' => true]);
         [, $projectA] = $this->clientProject('a@example.com');
         [, $projectB] = $this->clientProject('b@example.com');
@@ -135,7 +135,7 @@ class ProjectDocumentTest extends TestCase
 
     public function test_non_admin_cannot_upload_documents_through_admin_routes(): void
     {
-        Storage::fake('local');
+        Storage::fake('uploads');
         [$clientUser, $project] = $this->clientProject();
         $this->actingAs($clientUser);
 

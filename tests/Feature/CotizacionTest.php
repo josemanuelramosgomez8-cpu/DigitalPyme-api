@@ -2,10 +2,13 @@
 
 namespace Tests\Feature;
 
+use App\Mail\CotizacionEnviada;
 use App\Models\Cotizacion;
 use App\Models\Lead;
 use App\Models\User;
+use App\Support\CotizacionPdf;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Mail;
 use Tests\TestCase;
 
 class CotizacionTest extends TestCase
@@ -34,7 +37,7 @@ class CotizacionTest extends TestCase
             'servicio' => 'Página web',
             'estado' => 'borrador',
         ]);
-        $this->assertDatabaseHas('leads', ['id' => $lead->id, 'estado' => 'cotizado']);
+        $this->assertDatabaseHas('leads', ['id' => $lead->id, 'estado' => 'contactado']);
     }
 
     public function test_invalid_quote_data_is_rejected_without_creating_a_quote(): void
@@ -63,6 +66,64 @@ class CotizacionTest extends TestCase
             ->assertJsonPath('estado', 'aceptada');
 
         $this->assertDatabaseHas('leads', ['id' => $lead->id, 'estado' => 'ganado']);
+    }
+
+    public function test_sending_a_quote_emails_a_pdf_summary_to_the_customer(): void
+    {
+        Mail::fake();
+        config(['mail.default' => 'smtp']);
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+        $quote = $this->createQuote($this->createLead());
+
+        $this->patchJson("/api/cotizaciones/{$quote->id}", [
+            'servicio' => 'Página web empresarial',
+            'descripcion' => 'Diseño, desarrollo y capacitación confirmados.',
+            'monto' => 2400,
+            'estado' => 'enviada',
+        ])
+            ->assertOk()
+            ->assertJsonPath('estado', 'enviada')
+            ->assertJsonPath('monto', '2400.00')
+            ->assertJsonPath('email_enviado', true);
+
+        Mail::assertSent(CotizacionEnviada::class, fn (CotizacionEnviada $mail) => $mail->cotizacion->id === $quote->id);
+        $this->assertDatabaseHas('leads', ['id' => $quote->lead_id, 'estado' => 'cotizado']);
+        $pdf = CotizacionPdf::render($quote->fresh());
+        $this->assertStringStartsWith('%PDF-', $pdf);
+
+        $this->postJson("/api/cotizaciones/{$quote->id}/reenviar")
+            ->assertOk()
+            ->assertJsonPath('email_enviado', true);
+
+        Mail::assertSent(CotizacionEnviada::class, 2);
+    }
+
+    public function test_quote_without_a_confirmed_amount_cannot_be_sent_or_accepted(): void
+    {
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+        $quote = $this->createQuote($this->createLead(), ['monto' => 0]);
+
+        $this->patchJson("/api/cotizaciones/{$quote->id}", ['estado' => 'enviada'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['monto']);
+        $this->patchJson("/api/cotizaciones/{$quote->id}", ['estado' => 'aceptada'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['monto']);
+
+        $this->assertDatabaseHas('cotizaciones', ['id' => $quote->id, 'estado' => 'borrador']);
+    }
+
+    public function test_quote_without_a_defined_scope_cannot_be_sent_or_accepted(): void
+    {
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+        $quote = $this->createQuote($this->createLead(), ['descripcion' => null]);
+
+        $this->patchJson("/api/cotizaciones/{$quote->id}", ['estado' => 'enviada'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['descripcion']);
+        $this->patchJson("/api/cotizaciones/{$quote->id}", ['estado' => 'aceptada'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['descripcion']);
     }
 
     public function test_rejecting_the_last_accepted_quote_returns_a_won_lead_to_quoted(): void
@@ -118,6 +179,7 @@ class CotizacionTest extends TestCase
     {
         return $lead->cotizaciones()->create(array_merge([
             'servicio' => 'Página web',
+            'descripcion' => 'Diseño, desarrollo y puesta en marcha del sitio.',
             'monto' => 1800,
         ], $attributes));
     }

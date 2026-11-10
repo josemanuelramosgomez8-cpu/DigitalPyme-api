@@ -13,6 +13,12 @@ class Client extends Model
         'lead_id',
         'nombre',
         'empresa',
+        'telefono',
+        'tipo_documento',
+        'numero_documento',
+        'tipo_comprobante',
+        'direccion_entrega',
+        'ubicacion_entrega',
     ];
 
     public function user(): BelongsTo

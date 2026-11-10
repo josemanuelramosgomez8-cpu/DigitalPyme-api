@@ -3,7 +3,6 @@
 namespace Tests\Feature;
 
 use App\Models\ServiceCategory;
-use App\Models\ServiceReview;
 use App\Models\Servicio;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -54,6 +53,41 @@ class ServiceDetailsAndReviewsTest extends TestCase
             ->assertJsonPath('0.service.slug', 'landing-page')
             ->assertJsonPath('0.calificacion', 5)
             ->assertJsonMissingPath('0.email');
+    }
+
+    public function test_public_review_feed_supports_stable_pagination(): void
+    {
+        $service = Servicio::create([
+            'nombre' => 'Landing page',
+            'slug' => 'landing-page',
+            'activo' => true,
+        ]);
+        $reviewIds = [];
+        for ($index = 1; $index <= 8; $index++) {
+            $reviewIds[] = $service->reviews()->create([
+                'nombre' => "Cliente {$index}",
+                'email' => "cliente{$index}@example.com",
+                'calificacion' => 5,
+                'comentario' => "Reseña {$index}.",
+                'aprobada' => true,
+            ])->id;
+        }
+
+        $this->getJson('/api/resenas?offset=0&limit=3')
+            ->assertOk()
+            ->assertJsonCount(3)
+            ->assertJsonPath('0.id', $reviewIds[7])
+            ->assertJsonPath('2.id', $reviewIds[5])
+            ->assertJsonMissingPath('0.email');
+
+        $this->getJson('/api/resenas?offset=3&limit=3')
+            ->assertOk()
+            ->assertJsonCount(3)
+            ->assertJsonPath('0.id', $reviewIds[4])
+            ->assertJsonPath('2.id', $reviewIds[2]);
+
+        $this->getJson('/api/resenas?offset=-1')->assertUnprocessable();
+        $this->getJson('/api/resenas?limit=51')->assertUnprocessable();
     }
 
     public function test_service_details_return_slug_taxonomy_and_only_approved_reviews_without_private_email(): void

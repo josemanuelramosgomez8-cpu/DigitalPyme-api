@@ -8,6 +8,7 @@ use App\Models\Lead;
 use App\Models\Project;
 use App\Models\ProjectMonthlyCapacity;
 use App\Models\User;
+use App\Support\CotizacionNotifier;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -27,9 +28,9 @@ class CotizacionController extends Controller
     public function store(Request $request, Lead $lead)
     {
         $datos = $request->validate([
-            'servicio'    => 'required|string|max:255',
-            'descripcion' => 'nullable|string|max:2000',
-            'monto'       => 'required|numeric|min:0|max:99999999',
+            'servicio' => 'required|string|max:255',
+            'descripcion' => 'required|string|max:5000',
+            'monto' => 'required|numeric|min:0|max:99999999',
         ]);
         $datos['estado'] = 'borrador';
 
@@ -37,7 +38,7 @@ class CotizacionController extends Controller
             $cotizacion = $lead->cotizaciones()->create($datos);
 
             if (in_array($lead->estado, ['nuevo', 'contactado'], true)) {
-                $lead->update(['estado' => 'cotizado']);
+                $lead->update(['estado' => 'contactado']);
             }
 
             return $cotizacion;
@@ -46,21 +47,62 @@ class CotizacionController extends Controller
         return response()->json($cotizacion, 201);
     }
 
-    public function update(Request $request, Cotizacion $cotizacion)
+    public function update(Request $request, Cotizacion $cotizacion, CotizacionNotifier $notifier)
     {
         $datos = $request->validate([
-            'estado' => ['required', Rule::in(self::ESTADOS)],
+            'servicio' => 'sometimes|required|string|max:255',
+            'descripcion' => 'sometimes|nullable|string|max:5000',
+            'monto' => 'sometimes|required|numeric|min:0|max:99999999',
+            'estado' => ['sometimes', 'required', Rule::in(self::ESTADOS)],
         ]);
+        if ($datos === []) {
+            throw ValidationException::withMessages([
+                'cotizacion' => 'Incluye al menos un campo para actualizar la cotización.',
+            ]);
+        }
+        $estado = $datos['estado'] ?? $cotizacion->estado;
 
-        $cotizacion = DB::transaction(function () use ($cotizacion, $datos) {
+        [$cotizacion, $shouldSendEmail] = DB::transaction(function () use ($cotizacion, $datos, $estado) {
+            $cotizacion = Cotizacion::whereKey($cotizacion->id)->lockForUpdate()->firstOrFail();
             $lead = $cotizacion->lead()->lockForUpdate()->firstOrFail();
+            $shouldSendEmail = $estado === 'enviada' && $cotizacion->estado !== 'enviada';
+            $monto = $datos['monto'] ?? $cotizacion->monto;
+            $descripcion = $datos['descripcion'] ?? $cotizacion->descripcion;
+
+            if (
+                $cotizacion->estado !== 'borrador'
+                && array_intersect(['servicio', 'descripcion', 'monto'], array_keys($datos)) !== []
+            ) {
+                throw ValidationException::withMessages([
+                    'cotizacion' => 'Solo se puede editar el precio y alcance mientras la cotización está en borrador.',
+                ]);
+            }
+
+            if (in_array($estado, ['enviada', 'aceptada'], true) && (float) $monto <= 0) {
+                throw ValidationException::withMessages([
+                    'monto' => 'Confirma un monto mayor que cero antes de enviar o aceptar la cotización.',
+                ]);
+            }
+
+            if (in_array($estado, ['enviada', 'aceptada'], true) && blank($descripcion)) {
+                throw ValidationException::withMessages([
+                    'descripcion' => 'Define el alcance del proyecto antes de enviar o aceptar la cotización.',
+                ]);
+            }
+
+            if ($estado === 'enviada' && blank($lead->email)) {
+                throw ValidationException::withMessages([
+                    'lead' => 'Agrega un correo electrónico al cliente antes de enviar la cotización.',
+                ]);
+            }
+
             $cotizacion->update($datos);
 
             $tieneAceptada = $lead->cotizaciones()
                 ->where('estado', 'aceptada')
                 ->exists();
 
-            if ($datos['estado'] === 'aceptada') {
+            if ($estado === 'aceptada') {
                 $client = $this->ensureClientForLead($lead);
 
                 $month = now()->startOfMonth()->toDateString();
@@ -71,7 +113,7 @@ class CotizacionController extends Controller
                 $capacity = ProjectMonthlyCapacity::whereKey($capacity->id)->lockForUpdate()->firstOrFail();
                 $projectExists = Project::where('cotizacion_id', $cotizacion->id)->exists();
 
-                if (!$projectExists && $capacity->reserved >= $capacity->capacity) {
+                if (! $projectExists && $capacity->reserved >= $capacity->capacity) {
                     throw ValidationException::withMessages([
                         'capacidad' => 'No quedan cupos de proyectos disponibles para este mes.',
                     ]);
@@ -95,14 +137,38 @@ class CotizacionController extends Controller
 
             if ($tieneAceptada) {
                 $lead->update(['estado' => 'ganado']);
+            } elseif ($estado === 'enviada') {
+                $lead->update(['estado' => 'cotizado']);
             } elseif ($lead->estado === 'ganado') {
                 $lead->update(['estado' => 'cotizado']);
             }
 
-            return $cotizacion;
+            return [$cotizacion, $shouldSendEmail];
         });
 
-        return response()->json($cotizacion);
+        $emailEnviado = null;
+        if ($shouldSendEmail) {
+            $emailEnviado = $notifier->send($cotizacion->refresh());
+        }
+
+        return response()->json([
+            ...$cotizacion->refresh()->toArray(),
+            ...($emailEnviado === null ? [] : ['email_enviado' => $emailEnviado]),
+        ]);
+    }
+
+    public function resend(Cotizacion $cotizacion, CotizacionNotifier $notifier)
+    {
+        if ($cotizacion->estado !== 'enviada') {
+            throw ValidationException::withMessages([
+                'estado' => 'Solo se pueden reenviar cotizaciones que ya fueron enviadas.',
+            ]);
+        }
+
+        return response()->json([
+            ...$cotizacion->toArray(),
+            'email_enviado' => $notifier->send($cotizacion),
+        ]);
     }
 
     private function ensureClientForLead(Lead $lead): Client
@@ -122,7 +188,7 @@ class CotizacionController extends Controller
         $user = User::where('email', $lead->email)->first();
 
         if ($user) {
-            if (!$user->is_client || $user->client) {
+            if (! $user->is_client || $user->client) {
                 throw ValidationException::withMessages([
                     'lead' => 'El correo del lead ya pertenece a otra cuenta. Convierte el lead en cliente con otro correo antes de aceptar.',
                 ]);

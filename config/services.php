@@ -42,6 +42,7 @@ return [
 
     'mercadopago' => [
         'access_token' => env('MERCADOPAGO_ACCESS_TOKEN'),
+        'environment' => env('MERCADOPAGO_ENVIRONMENT', 'sandbox'),
         'webhook_url' => env('MERCADOPAGO_WEBHOOK_URL'),
         'return_url' => env('PAYMENT_RETURN_URL', 'http://localhost:8443'),
     ],

@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${APP_PORT:-8080}:80"
+    environment:
+      UPLOADS_PATH: /var/www/html/storage/app/private
+    volumes:
+      - uploads:/var/www/html/storage/app/private
+
+  scheduler:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: ["php", "artisan", "schedule:work"]
+
+volumes:
+  uploads:
+    name: digitalpyme-uploads

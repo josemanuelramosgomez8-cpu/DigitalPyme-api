@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Mail\CodigoVerificacionCotizacion;
 use App\Mail\SolicitudRecibida;
 use App\Models\Lead;
 use App\Models\Servicio;
@@ -26,12 +27,13 @@ class PublicProposalTest extends TestCase
         Mail::fake();
         $this->seed();
         Servicio::where('nombre', 'Páginas web')->update(['precio_desde' => 1800]);
+        $payload = $this->verifiedProposalPayload('ana@example.com');
 
         $response = $this->postJson('/api/propuestas', [
-            'nombre' => 'Ana Pérez',
+            ...$payload,
             'empresa' => 'Tienda de Ana',
-            'email' => 'ana@example.com',
             'servicios' => ['Páginas web', 'Tiendas en línea'],
+            'metodo_pago_preferido' => 'card',
             'mensaje' => 'Necesito vender mis productos en línea.',
             'inversion_estimada' => 1,
         ]);
@@ -39,6 +41,7 @@ class PublicProposalTest extends TestCase
         $response->assertCreated()
             ->assertJsonPath('inversion_estimada', 1800)
             ->assertJsonPath('incluye_servicios_a_cotizar', true)
+            ->assertJsonPath('metodo_pago_preferido', 'card')
             ->assertJsonPath('email_enviado', true);
 
         $this->assertDatabaseHas('leads', [
@@ -52,21 +55,37 @@ class PublicProposalTest extends TestCase
             'monto' => 1800,
             'estado' => 'borrador',
         ]);
+        $lead = Lead::where('email', 'ana@example.com')->firstOrFail();
+        $quote = $lead->cotizaciones()->firstOrFail();
+        $this->assertStringContainsString('Consentimientos registrados:', $lead->mensaje);
+        $this->assertStringContainsString('Método de pago preferido (referencial): Tarjeta (Mercado Pago)', $lead->mensaje);
+        $this->assertStringContainsString('Necesito vender mis productos en línea.', $quote->descripcion);
+        $this->assertStringNotContainsString('Consentimientos registrados:', $quote->descripcion);
 
         Mail::assertSent(SolicitudRecibida::class, function (SolicitudRecibida $mail) {
             return $mail->lead->email === 'ana@example.com'
                 && $mail->cotizacion?->monto === '1800.00';
         });
+
+        $this->postJson('/api/propuestas', [
+            ...$payload,
+            'empresa' => 'Tienda de Ana',
+            'servicios' => ['Páginas web', 'Tiendas en línea'],
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['verification_token']);
+
+        $this->assertDatabaseCount('leads', 1);
     }
 
     public function test_invalid_or_inactive_services_do_not_create_a_lead_or_quote(): void
     {
+        Mail::fake();
         $this->seed();
+        $payload = $this->verifiedProposalPayload('ana@example.com');
         Servicio::where('nombre', 'Páginas web')->update(['activo' => false]);
 
         $this->postJson('/api/propuestas', [
-            'nombre' => 'Ana Pérez',
-            'email' => 'ana@example.com',
+            ...$payload,
             'servicios' => ['Páginas web'],
         ])->assertUnprocessable()
             ->assertJsonValidationErrors(['servicios']);
@@ -117,8 +136,8 @@ class PublicProposalTest extends TestCase
         Mail::fake();
         $this->seed();
         $payload = [
+            ...$this->verifiedProposalPayload('cliente@example.com'),
             'nombre' => 'Cliente de prueba',
-            'email' => 'cliente@example.com',
             'servicios' => ['Páginas web'],
         ];
 
@@ -132,8 +151,10 @@ class PublicProposalTest extends TestCase
             ])->assertOk();
 
         $response = $this->postJson('/api/propuestas', [
-            ...$payload,
+            ...$this->verifiedProposalPayload('otro@example.com'),
             'email' => 'otro@example.com',
+            'nombre' => 'Cliente de prueba',
+            'servicios' => ['Páginas web'],
         ])->assertCreated();
 
         $this->assertStringStartsWith(
@@ -152,8 +173,7 @@ class PublicProposalTest extends TestCase
         $this->seed();
 
         $this->postJson('/api/propuestas', [
-            'nombre' => 'Cliente de prueba',
-            'email' => 'cliente@example.com',
+            ...$this->verifiedProposalPayload('cliente@example.com'),
             'servicios' => ['Páginas web'],
         ])->assertCreated()
             ->assertJsonPath('inversion_estimada', null)
@@ -168,7 +188,109 @@ class PublicProposalTest extends TestCase
             $html = $mail->render();
 
             return str_contains($html, 'Pendiente de cotización.')
-                && !str_contains($html, 'S/ 0.00');
+                && ! str_contains($html, 'S/ 0.00');
         });
+    }
+
+    public function test_public_proposal_requires_verified_email_registration_and_consent(): void
+    {
+        $this->seed();
+
+        $this->postJson('/api/propuestas', [
+            'nombre' => 'Ana',
+            'apellido' => 'Pérez',
+            'empresa' => 'Tienda de Ana',
+            'pais' => 'Perú',
+            'email' => 'ana@example.com',
+            'telefono' => '+51912345678',
+            'servicios' => ['Páginas web'],
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['verification_token', 'acepta_terminos', 'acepta_privacidad']);
+
+        $this->assertDatabaseCount('leads', 0);
+        $this->assertDatabaseCount('cotizaciones', 0);
+    }
+
+    public function test_public_proposal_rejects_unknown_payment_preferences(): void
+    {
+        Mail::fake();
+        $this->seed();
+        $payload = $this->verifiedProposalPayload('ana@example.com');
+
+        $this->postJson('/api/propuestas', [
+            ...$payload,
+            'servicios' => ['Páginas web'],
+            'metodo_pago_preferido' => 'cash',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['metodo_pago_preferido']);
+
+        $this->assertDatabaseCount('leads', 0);
+        $this->assertDatabaseCount('cotizaciones', 0);
+    }
+
+    public function test_public_proposal_records_yape_plin_and_paypal_payment_preferences(): void
+    {
+        Mail::fake();
+        $this->seed();
+
+        foreach ([
+            'yape' => 'Yape (número o QR)',
+            'plin' => 'Plin',
+            'paypal' => 'PayPal (demo)',
+        ] as $method => $label) {
+            if ($method === 'plin') {
+                $this->travel(61)->seconds();
+            } elseif ($method === 'paypal') {
+                $this->travel(61)->seconds();
+            }
+
+            $email = "{$method}@example.com";
+            $this->postJson('/api/propuestas', [
+                ...$this->verifiedProposalPayload($email),
+                'servicios' => ['Páginas web'],
+                'metodo_pago_preferido' => $method,
+            ])->assertCreated()
+                ->assertJsonPath('metodo_pago_preferido', $method);
+
+            $lead = Lead::where('email', $email)->firstOrFail();
+            $this->assertStringContainsString("Método de pago preferido (referencial): {$label}", $lead->mensaje);
+        }
+
+        $this->assertDatabaseCount('leads', 3);
+        $this->assertDatabaseCount('cotizaciones', 3);
+    }
+
+    private function verifiedProposalPayload(string $email): array
+    {
+        $this->postJson('/api/propuestas/codigo', [
+            'email' => $email,
+            'website' => '',
+        ])->assertOk();
+
+        $code = null;
+        Mail::assertSent(CodigoVerificacionCotizacion::class, function (CodigoVerificacionCotizacion $mail) use (&$code) {
+            $code = $mail->code;
+
+            return true;
+        });
+
+        $verification = $this->postJson('/api/propuestas/verificar-codigo', [
+            'email' => $email,
+            'code' => $code,
+            'website' => '',
+        ])->assertOk();
+
+        return [
+            'nombre' => 'Ana',
+            'apellido' => 'Pérez',
+            'empresa' => 'Tienda de Ana',
+            'pais' => 'Perú',
+            'email' => $email,
+            'telefono' => '+51912345678',
+            'verification_token' => $verification->json('verification_token'),
+            'acepta_terminos' => true,
+            'acepta_privacidad' => true,
+            'website' => '',
+        ];
     }
 }

@@ -76,7 +76,7 @@ class ProjectDocumentController extends Controller
     {
         $this->ensureDocumentBelongsToProject($project, $document);
 
-        if (!Storage::disk('local')->delete($document->file_path)) {
+        if (!Storage::disk('uploads')->delete($document->file_path)) {
             abort(500, 'No se pudo eliminar el archivo del almacenamiento.');
         }
 
@@ -103,7 +103,7 @@ class ProjectDocumentController extends Controller
     )
     {
         $file = $request->file('file');
-        $path = $file->store("projects/{$project->id}", 'local');
+        $path = $file->store("projects/{$project->id}", 'uploads');
 
         if (!is_string($path) || $path === '') {
             abort(500, 'No se pudo guardar el archivo.');
@@ -142,7 +142,7 @@ class ProjectDocumentController extends Controller
                 return $document;
             });
         } catch (\Throwable $exception) {
-            Storage::disk('local')->delete($path);
+            Storage::disk('uploads')->delete($path);
 
             throw $exception;
         }
@@ -152,11 +152,11 @@ class ProjectDocumentController extends Controller
 
     private function download(ProjectDocument $document)
     {
-        if (!Storage::disk('local')->exists($document->file_path)) {
+        if (!Storage::disk('uploads')->exists($document->file_path)) {
             abort(404, 'No se encontró el archivo solicitado.');
         }
 
-        return Storage::disk('local')->download($document->file_path, $document->original_name, [
+        return Storage::disk('uploads')->download($document->file_path, $document->original_name, [
             'Content-Type' => $document->mime_type,
             'X-Content-Type-Options' => 'nosniff',
         ]);

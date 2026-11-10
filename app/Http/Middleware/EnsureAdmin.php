@@ -10,7 +10,7 @@ class EnsureAdmin
 {
     public function handle(Request $request, Closure $next): Response
     {
-        abort_unless($request->user()?->is_admin, 403, 'No tienes permiso para realizar esta acción.');
+        abort_unless($request->user()?->is_admin && $request->user()->is_active, 403, 'No tienes permiso para realizar esta acción.');
 
         return $next($request);
     }

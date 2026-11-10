@@ -45,6 +45,11 @@ class PublicCatalogTest extends TestCase
             'categoria' => 'Servicios',
             'resultado' => 'Caso autorizado',
             'imagen' => 'https://example.com/verified.jpg',
+            'descripcion_larga' => 'Resumen del proyecto verificado.',
+            'desafio' => 'El reto del proyecto.',
+            'solucion' => 'La solución del proyecto.',
+            'entregables' => ['Sitio informativo', 'Formulario'],
+            'tecnologias' => ['Laravel', 'React'],
             'activo' => true,
             'orden' => 1,
         ]);
@@ -67,9 +72,13 @@ class PublicCatalogTest extends TestCase
 
         $this->getJson('/api/portafolio')
             ->assertOk()
-            ->assertJsonCount(2)
+            ->assertJsonCount(5)
             ->assertJsonPath('0.nombre', 'DigitalPyme')
-            ->assertJsonPath('1.nombre', 'Proyecto verificado');
+            ->assertJsonPath('1.nombre', 'Proyecto verificado')
+            ->assertJsonPath('1.descripcion_larga', 'Resumen del proyecto verificado.')
+            ->assertJsonPath('1.entregables.0', 'Sitio informativo')
+            ->assertJsonPath('1.tecnologias.1', 'React')
+            ->assertJsonPath('2.categoria', 'Concepto de muestra');
 
         $this->getJson('/api/testimonios')
             ->assertOk()
@@ -91,6 +100,11 @@ class PublicCatalogTest extends TestCase
             'nombre' => 'Proyecto de prueba',
             'categoria' => 'Tiendas',
             'resultado' => '+20% conversiones',
+            'descripcion_larga' => 'Resumen para mostrar el detalle completo.',
+            'desafio' => 'Desafío de demostración.',
+            'solucion' => 'Solución de demostración.',
+            'entregables' => ['Página web', 'Formulario'],
+            'tecnologias' => ['React', 'Laravel'],
             'imagen' => 'https://example.com/project.jpg',
             'imagen_alt' => 'Tienda digital de prueba',
         ];
@@ -113,11 +127,14 @@ class PublicCatalogTest extends TestCase
             ->postJson('/api/admin/portafolio', $projectData)
             ->assertCreated()
             ->assertJsonPath('nombre', 'Proyecto de prueba')
+            ->assertJsonPath('descripcion_larga', 'Resumen para mostrar el detalle completo.')
+            ->assertJsonPath('entregables.0', 'Página web')
             ->json('id');
 
         $this->putJson("/api/admin/portafolio/{$project}", ['activo' => false])
             ->assertOk()
-            ->assertJsonPath('activo', false);
+            ->assertJsonPath('activo', false)
+            ->assertJsonPath('tecnologias.1', 'Laravel');
         $this->deleteJson("/api/admin/portafolio/{$project}")->assertOk();
 
         $testimonial = $this->postJson('/api/admin/testimonios', $testimonialData)

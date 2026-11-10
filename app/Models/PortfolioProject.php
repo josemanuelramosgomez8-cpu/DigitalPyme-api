@@ -10,6 +10,11 @@ class PortfolioProject extends Model
         'nombre',
         'categoria',
         'resultado',
+        'descripcion_larga',
+        'desafio',
+        'solucion',
+        'entregables',
+        'tecnologias',
         'imagen',
         'imagen_alt',
         'etiqueta',
@@ -23,6 +28,8 @@ class PortfolioProject extends Model
         return [
             'activo' => 'boolean',
             'orden' => 'integer',
+            'entregables' => 'array',
+            'tecnologias' => 'array',
         ];
     }
 

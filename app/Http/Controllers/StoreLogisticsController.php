@@ -7,6 +7,8 @@ use App\Models\StockMovement;
 use App\Models\StoreOrder;
 use App\Models\StoreProduct;
 use App\Models\StoreReturn;
+use App\Models\StoreCoupon;
+use App\Support\StoreOrderNotifier;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -45,13 +47,13 @@ class StoreLogisticsController extends Controller
     public function publicProductImage(StoreProduct $storeProduct)
     {
         abort_unless($storeProduct->image_path, 404);
-        abort_unless(Storage::disk('local')->exists($storeProduct->image_path), 404, 'No se encontró la imagen.');
+        abort_unless(Storage::disk('uploads')->exists($storeProduct->image_path), 404, 'No se encontró la imagen.');
 
-        return response()->file(Storage::disk('local')->path($storeProduct->image_path), [
+        return Storage::disk('uploads')->response($storeProduct->image_path, null, [
             'Content-Type' => $storeProduct->image_mime_type,
             'X-Content-Type-Options' => 'nosniff',
             'Cache-Control' => 'public, max-age=3600',
-        ]);
+        ], 'inline');
     }
 
     public function shippingOptions()
@@ -60,6 +62,7 @@ class StoreLogisticsController extends Controller
 
         return response()->json([
             'methods' => $settings['shipping_methods'],
+            'zones' => $settings['shipping_zones'],
             'free_shipping_threshold' => $settings['free_shipping_threshold'],
         ]);
     }
@@ -78,6 +81,8 @@ class StoreLogisticsController extends Controller
 
         return [
             'card_enabled' => filled(config('services.mercadopago.access_token')),
+            'card_environment' => config('services.mercadopago.environment', 'sandbox'),
+            'igv_rate' => 18,
             'bank_transfer' => [
                 'enabled' => $bankEnabled,
                 'bank' => $bankEnabled ? $bankTransfer['bank'] : null,
@@ -104,9 +109,29 @@ class StoreLogisticsController extends Controller
             'payment_method' => ['required', Rule::in(StoreOrder::PAYMENT_METHODS)],
             'ubicacion_entrega' => ['required', 'string', 'max:120'],
             'direccion_entrega' => ['required', 'string', 'max:255'],
+            'telefono' => ['required', 'string', 'regex:/^[0-9+()\s.-]{7,20}$/'],
+            'tipo_comprobante' => ['required', Rule::in(['boleta', 'factura'])],
+            'tipo_documento' => ['required', Rule::in(['dni', 'ruc'])],
+            'numero_documento' => ['required', 'string', 'max:20'],
+            'empresa_facturacion' => ['required_if:tipo_comprobante,factura', 'nullable', 'string', 'max:255'],
+            'coupon_code' => ['nullable', 'string', 'max:32'],
             'tipo_operacion' => ['sometimes', Rule::in(['in-house', '3PL'])],
             'operador_logistico' => ['required_if:tipo_operacion,3PL', 'nullable', 'string', 'max:120'],
         ]);
+
+        $documentLength = $data['tipo_documento'] === 'dni' ? 8 : 11;
+        if (! ctype_digit($data['numero_documento']) || strlen($data['numero_documento']) !== $documentLength) {
+            throw ValidationException::withMessages([
+                'numero_documento' => $data['tipo_documento'] === 'dni'
+                    ? 'El DNI debe tener 8 dígitos.'
+                    : 'El RUC debe tener 11 dígitos.',
+            ]);
+        }
+        if ($data['tipo_comprobante'] === 'factura' && $data['tipo_documento'] !== 'ruc') {
+            throw ValidationException::withMessages([
+                'tipo_documento' => 'Para emitir factura debes ingresar un RUC.',
+            ]);
+        }
 
         $coverage = SiteSetting::publicSettings()['coverage'];
         $shippingMethod = collect($coverage['shipping_methods'])->firstWhere('key', $data['metodo_envio']);
@@ -154,16 +179,53 @@ class StoreLogisticsController extends Controller
                 $subtotalCents += $unitPriceCents * $item['cantidad'];
             }
 
+            $coupon = null;
+            $discountCents = 0;
+            if (filled($data['coupon_code'] ?? null)) {
+                $coupon = StoreCoupon::query()
+                    ->where('code', strtoupper(trim($data['coupon_code'])))
+                    ->lockForUpdate()
+                    ->first();
+
+                if (! $coupon || ! $coupon->isAvailable()) {
+                    throw ValidationException::withMessages([
+                        'coupon_code' => 'El cupón no existe, venció o no está activo.',
+                    ]);
+                }
+
+                $discountCents = StoreCouponController::discountCents($coupon, $subtotalCents);
+            }
+
             $zoneBaseCents = $shippingZone
                 ? self::amountToCents($shippingZone['fee'])
                 : self::amountToCents($standardShippingMethod['cost'] ?? $shippingMethod['cost']);
             $standardCostCents = self::amountToCents($standardShippingMethod['cost'] ?? $shippingMethod['cost']);
             $methodSurchargeCents = self::amountToCents($shippingMethod['cost']) - $standardCostCents;
-            $shippingCostCents = $subtotalCents >= self::amountToCents($coverage['free_shipping_threshold'])
+            $discountedSubtotalCents = $subtotalCents - $discountCents;
+            $shippingCostCents = $discountedSubtotalCents >= self::amountToCents($coverage['free_shipping_threshold'])
                 ? 0
                 : max(0, $zoneBaseCents + $methodSurchargeCents);
+            $taxableBaseCents = $discountedSubtotalCents + $shippingCostCents;
+            $igvCents = intdiv(($taxableBaseCents * 18) + 50, 100);
+            $client = $request->user()->client;
+            $client->update([
+                'telefono' => $data['telefono'],
+                'tipo_documento' => $data['tipo_documento'],
+                'numero_documento' => $data['numero_documento'],
+                'tipo_comprobante' => $data['tipo_comprobante'],
+                'empresa' => $data['empresa_facturacion'] ?? $client->empresa,
+                'direccion_entrega' => $data['direccion_entrega'],
+                'ubicacion_entrega' => $data['ubicacion_entrega'],
+            ]);
             $order = StoreOrder::create([
-                'client_id' => $request->user()->client->id,
+                'client_id' => $client->id,
+                'nombre_cliente' => $client->nombre,
+                'email_cliente' => $request->user()->email,
+                'telefono_cliente' => $data['telefono'],
+                'tipo_comprobante' => $data['tipo_comprobante'],
+                'tipo_documento' => $data['tipo_documento'],
+                'numero_documento' => $data['numero_documento'],
+                'empresa_facturacion' => $data['empresa_facturacion'] ?? null,
                 'estado' => 'recibido',
                 'payment_method' => $data['payment_method'],
                 'payment_status' => 'pendiente',
@@ -175,7 +237,11 @@ class StoreLogisticsController extends Controller
                 'direccion_entrega' => $data['direccion_entrega'],
                 'subtotal' => self::centsToAmount($subtotalCents),
                 'costo_envio' => self::centsToAmount($shippingCostCents),
-                'total' => self::centsToAmount($subtotalCents + $shippingCostCents),
+                'discount_amount' => self::centsToAmount($discountCents),
+                'coupon_code' => $coupon?->code,
+                'igv_rate' => 18,
+                'igv_amount' => self::centsToAmount($igvCents),
+                'total' => self::centsToAmount($taxableBaseCents + $igvCents),
             ]);
 
             foreach ($lockedProducts as [$product, $quantity, $unitPriceCents]) {
@@ -201,9 +267,13 @@ class StoreLogisticsController extends Controller
             return $order;
         });
 
-        return response()->json($order->load([
+        $emailSent = app(StoreOrderNotifier::class)->send($order);
+        $response = $order->load([
             'items' => fn ($query) => $query->orderBy('id'),
-        ]), 201);
+        ])->toArray();
+        $response['email_enviado'] = $emailSent;
+
+        return response()->json($response, 201);
     }
 
     public function startCardPayment(Request $request, StoreOrder $storeOrder)
@@ -236,23 +306,13 @@ class StoreLogisticsController extends Controller
         $frontUrl = rtrim(config('services.mercadopago.return_url'), '/').'/tienda?pedido='.$storeOrder->id;
         $webhookUrl = config('services.mercadopago.webhook_url')
             ?: url('/api/payments/mercadopago/webhook');
-        $items = $storeOrder->items->map(fn ($item) => [
-            'id' => (string) ($item->product_id ?? $item->id),
-            'title' => $item->nombre,
-            'quantity' => $item->cantidad,
-            'unit_price' => (float) $item->precio_unitario,
+        $items = [[
+            'id' => "store-order-{$storeOrder->id}",
+            'title' => "Pedido #{$storeOrder->id} (productos, envío e IGV)",
+            'quantity' => 1,
+            'unit_price' => (float) $storeOrder->total,
             'currency_id' => 'PEN',
-        ])->all();
-
-        if ((float) $storeOrder->costo_envio > 0) {
-            $items[] = [
-                'id' => "store-order-{$storeOrder->id}-shipping",
-                'title' => "Envío del pedido #{$storeOrder->id}",
-                'quantity' => 1,
-                'unit_price' => (float) $storeOrder->costo_envio,
-                'currency_id' => 'PEN',
-            ];
-        }
+        ]];
 
         try {
             $preference = Http::withToken($accessToken)
@@ -277,7 +337,9 @@ class StoreLogisticsController extends Controller
                 ]);
             $preference->throw();
 
-            $checkoutUrl = $preference->json('init_point');
+            $checkoutUrl = config('services.mercadopago.environment', 'sandbox') === 'sandbox'
+                ? $preference->json('sandbox_init_point')
+                : $preference->json('init_point');
             $preferenceId = $preference->json('id');
             $checkoutHost = is_string($checkoutUrl) ? parse_url($checkoutUrl, PHP_URL_HOST) : null;
             if (
@@ -406,6 +468,7 @@ class StoreLogisticsController extends Controller
             'products' => $products->items(),
             'movements' => $movements->items(),
             'orders' => $orders->items(),
+            'coupons' => StoreCoupon::query()->orderBy('code')->get(),
             'returns' => $returns->items(),
             'pagination' => [
                 'products' => $this->paginationMetadata($products),
@@ -499,7 +562,7 @@ class StoreLogisticsController extends Controller
         $path = $image->storeAs(
             "store-products/{$storeProduct->id}",
             Str::uuid().'.'.$extension,
-            'local',
+            'uploads',
         );
         if (! is_string($path) || $path === '') {
             abort(500, 'No se pudo guardar la imagen del producto.');
@@ -517,12 +580,12 @@ class StoreLogisticsController extends Controller
                 return $previousPath;
             });
         } catch (Throwable $exception) {
-            Storage::disk('local')->delete($path);
+            Storage::disk('uploads')->delete($path);
 
             throw $exception;
         }
 
-        if ($previousPath && ! Storage::disk('local')->delete($previousPath)) {
+        if ($previousPath && ! Storage::disk('uploads')->delete($previousPath)) {
             Log::warning('No se pudo eliminar la imagen anterior del producto.', [
                 'product_id' => $storeProduct->id,
                 'path' => $previousPath,
@@ -547,7 +610,7 @@ class StoreLogisticsController extends Controller
             $product->update(['image_path' => null, 'image_mime_type' => null]);
         });
 
-        if (! Storage::disk('local')->delete($path)) {
+        if (! Storage::disk('uploads')->delete($path)) {
             Log::warning('No se pudo eliminar el archivo de imagen del producto.', [
                 'product_id' => $storeProduct->id,
                 'path' => $path,
@@ -627,7 +690,9 @@ class StoreLogisticsController extends Controller
             return $order;
         });
 
-        return response()->json($order->load(['client:id,nombre,empresa', 'items', 'returnRequest']));
+        $response = $order->load(['client:id,nombre,empresa', 'items', 'returnRequest'])->toArray();
+
+        return response()->json($response);
     }
 
     public function uploadClientReceipt(Request $request, StoreOrder $storeOrder)
@@ -636,7 +701,7 @@ class StoreLogisticsController extends Controller
             'file' => ['required', 'file', 'mimes:jpg,jpeg,png,pdf', 'max:10240'],
         ]);
         $file = $request->file('file');
-        $path = $file->store("store-orders/{$storeOrder->id}/receipts", 'local');
+        $path = $file->store("store-orders/{$storeOrder->id}/receipts", 'uploads');
         if (! is_string($path) || $path === '') {
             abort(500, 'No se pudo guardar el comprobante.');
         }
@@ -669,12 +734,12 @@ class StoreLogisticsController extends Controller
                 return $previousPath;
             });
         } catch (Throwable $exception) {
-            Storage::disk('local')->delete($path);
+            Storage::disk('uploads')->delete($path);
 
             throw $exception;
         }
 
-        if ($previousPath && ! Storage::disk('local')->delete($previousPath)) {
+        if ($previousPath && ! Storage::disk('uploads')->delete($previousPath)) {
             Log::warning('No se pudo eliminar el comprobante reemplazado del pedido.', [
                 'order_id' => $storeOrder->id,
                 'path' => $previousPath,
@@ -688,7 +753,7 @@ class StoreLogisticsController extends Controller
         ], 201);
     }
 
-    public function updatePaymentStatus(Request $request, StoreOrder $storeOrder)
+    public function updatePaymentStatus(Request $request, StoreOrder $storeOrder, StoreOrderNotifier $orderNotifier)
     {
         $data = $request->validate([
             'payment_status' => ['required', Rule::in(['pagado', 'rechazado'])],
@@ -711,7 +776,12 @@ class StoreLogisticsController extends Controller
             return $order;
         });
 
-        return response()->json($order->load(['client:id,nombre,empresa', 'items', 'returnRequest']));
+        $response = $order->load(['client:id,nombre,empresa', 'items', 'returnRequest'])->toArray();
+        if ($data['payment_status'] === 'pagado') {
+            $response['receipt_email_sent'] = $orderNotifier->send($order);
+        }
+
+        return response()->json($response);
     }
 
     public function clientReceipt(Request $request, StoreOrder $storeOrder)
@@ -728,9 +798,9 @@ class StoreLogisticsController extends Controller
 
     private function downloadReceipt(StoreOrder $order)
     {
-        abort_unless($order->receipt_path && Storage::disk('local')->exists($order->receipt_path), 404, 'No se encontró el comprobante.');
+        abort_unless($order->receipt_path && Storage::disk('uploads')->exists($order->receipt_path), 404, 'No se encontró el comprobante.');
 
-        return Storage::disk('local')->download($order->receipt_path, $order->receipt_original_name, [
+        return Storage::disk('uploads')->download($order->receipt_path, $order->receipt_original_name, [
             'Content-Type' => $order->receipt_mime_type,
             'X-Content-Type-Options' => 'nosniff',
         ]);

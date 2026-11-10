@@ -8,16 +8,23 @@ use Illuminate\Http\Request;
 
 class ServiceReviewController extends Controller
 {
-    public function publicos()
+    public function publicos(Request $request)
     {
+        $pagination = $request->validate([
+            'offset' => ['sometimes', 'integer', 'min:0', 'max:10000'],
+            'limit' => ['sometimes', 'integer', 'min:1', 'max:50'],
+        ]);
+
         return response()->json(
             ServiceReview::query()
                 ->where('aprobada', true)
                 ->whereHas('service', fn ($query) => $query->where('activo', true))
                 ->with('service:id,nombre,slug')
                 ->select(['id', 'servicio_id', 'nombre', 'calificacion', 'titulo', 'comentario', 'created_at'])
-                ->latest()
-                ->limit(6)
+                ->orderByDesc('created_at')
+                ->orderByDesc('id')
+                ->offset($pagination['offset'] ?? 0)
+                ->limit($pagination['limit'] ?? 6)
                 ->get()
         );
     }
