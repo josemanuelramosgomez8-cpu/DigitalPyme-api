@@ -38,6 +38,9 @@ return [
     'digitalpyme' => [
         'solicitudes_email' => env('SOLICITUDES_EMAIL'),
         'frontend_url' => env('FRONTEND_URL', 'http://localhost:8443'),
+        'legal_policy_version' => env('LEGAL_POLICY_VERSION', '2026-11-19'),
+        'complaint_book_url' => env('COMPLAINT_BOOK_URL'),
+        'cart_abandoned_coupon' => env('CART_ABANDONED_COUPON'),
     ],
 
     'mercadopago' => [

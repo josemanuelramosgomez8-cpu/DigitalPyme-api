@@ -14,12 +14,7 @@ class SiteSettingsController extends Controller
 
     public function show()
     {
-        $settings = SiteSetting::publicSettings();
-        if (!($settings['legal']['privacy_published'] ?? false)) {
-            $settings['legal']['privacy'] = null;
-        }
-
-        return response()->json($settings);
+        return response()->json(SiteSetting::publicSettings());
     }
 
     public function adminShow()
@@ -64,6 +59,10 @@ class SiteSettingsController extends Controller
             'legal.warranty' => ['sometimes', 'required', 'string', 'max:5000'],
             'legal.terms' => ['sometimes', 'required', 'string', 'max:5000'],
             'legal.returns' => ['sometimes', 'required', 'string', 'max:5000'],
+            'legal.payments' => ['sometimes', 'required', 'string', 'max:5000'],
+            'legal.revisions' => ['sometimes', 'required', 'string', 'max:5000'],
+            'legal.intellectual_property' => ['sometimes', 'required', 'string', 'max:5000'],
+            'legal.promotions' => ['sometimes', 'required', 'string', 'max:5000'],
         ]);
 
         foreach ($data['coverage']['shipping_zones'] ?? [] as $zone) {

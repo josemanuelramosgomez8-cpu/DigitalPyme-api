@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\ProjectStatusChanged;
 use App\Models\Project;
 use App\Models\ProjectMilestone;
 use Illuminate\Http\Request;
@@ -50,7 +51,11 @@ class ProjectController extends Controller
             'fecha_entrega' => 'nullable|date|after_or_equal:fecha_inicio',
         ]);
 
+        $previousStatus = $project->estado;
         $project->update($datos);
+        if ($project->estado !== $previousStatus) {
+            event(new ProjectStatusChanged($project->refresh(), $previousStatus, $project->estado));
+        }
 
         return response()->json($project->load(['client:id,nombre,empresa', 'cotizacion:id,servicio,monto,estado']));
     }
@@ -99,7 +104,12 @@ class ProjectController extends Controller
         return response()->json($project->milestones()->create($data), 201);
     }
 
-    public function adminUpdateMilestone(Request $request, Project $project, ProjectMilestone $milestone)
+    public function adminUpdateMilestone(
+        Request $request,
+        Project $project,
+        ProjectMilestone $milestone,
+        \App\Services\CustomerLifecycleNotifier $notifier,
+    )
     {
         abort_unless($milestone->project_id === $project->id, 404);
 
@@ -114,7 +124,27 @@ class ProjectController extends Controller
             $data['approved_at'] = $data['estado'] === 'aprobado' ? now() : null;
         }
 
+        $previousStatus = $milestone->estado;
         $milestone->update($data);
+        if (isset($data['estado']) && $milestone->estado !== $previousStatus) {
+            $milestone->loadMissing('project.client.user');
+            $user = $milestone->project->client?->user;
+            if ($user) {
+                $notifier->notify(
+                    eventType: 'project_milestone_updated',
+                    email: $user->email,
+                    subject: 'Avance de proyecto: '.$milestone->project->nombre,
+                    intro: "El hito «{$milestone->titulo}» cambió a {$milestone->estado}.",
+                    details: array_values(array_filter([
+                        $milestone->descripcion,
+                        'Proyecto: '.$milestone->project->nombre,
+                    ])),
+                    userId: $user->id,
+                    actionLabel: 'Ver avances',
+                    actionUrl: rtrim(config('services.digitalpyme.frontend_url'), '/').'/?portal=1&tab=proyecto',
+                );
+            }
+        }
 
         return response()->json($milestone->refresh());
     }

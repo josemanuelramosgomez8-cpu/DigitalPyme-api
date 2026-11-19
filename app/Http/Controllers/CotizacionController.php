@@ -9,9 +9,11 @@ use App\Models\Project;
 use App\Models\ProjectMonthlyCapacity;
 use App\Models\User;
 use App\Support\CotizacionNotifier;
+use App\Services\CustomerLifecycleNotifier;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -62,10 +64,11 @@ class CotizacionController extends Controller
         }
         $estado = $datos['estado'] ?? $cotizacion->estado;
 
-        [$cotizacion, $shouldSendEmail] = DB::transaction(function () use ($cotizacion, $datos, $estado) {
+        [$cotizacion, $shouldSendEmail, $newlyAccepted] = DB::transaction(function () use ($cotizacion, $datos, $estado) {
             $cotizacion = Cotizacion::whereKey($cotizacion->id)->lockForUpdate()->firstOrFail();
             $lead = $cotizacion->lead()->lockForUpdate()->firstOrFail();
             $shouldSendEmail = $estado === 'enviada' && $cotizacion->estado !== 'enviada';
+            $newlyAccepted = $estado === 'aceptada' && $cotizacion->estado !== 'aceptada';
             $monto = $datos['monto'] ?? $cotizacion->monto;
             $descripcion = $datos['descripcion'] ?? $cotizacion->descripcion;
 
@@ -143,12 +146,39 @@ class CotizacionController extends Controller
                 $lead->update(['estado' => 'cotizado']);
             }
 
-            return [$cotizacion, $shouldSendEmail];
+            return [$cotizacion, $shouldSendEmail, $newlyAccepted];
         });
 
         $emailEnviado = null;
         if ($shouldSendEmail) {
             $emailEnviado = $notifier->send($cotizacion->refresh());
+        }
+
+        if ($newlyAccepted) {
+            $project = Project::query()
+                ->with('client.user')
+                ->where('cotizacion_id', $cotizacion->id)
+                ->firstOrFail();
+            $user = $project->client?->user;
+            if ($user) {
+                app(CustomerLifecycleNotifier::class)->notify(
+                    eventType: 'project_onboarding',
+                    email: $user->email,
+                    subject: 'Comencemos tu proyecto con DigitalPyme',
+                    intro: 'Tu propuesta fue aceptada. Completa el brief para que el equipo pueda iniciar el trabajo.',
+                    details: [
+                        'Proyecto: '.$project->nombre,
+                        'El enlace seguro del formulario vence en 30 días.',
+                    ],
+                    userId: $user->id,
+                    actionLabel: 'Completar mi brief',
+                    actionUrl: URL::temporarySignedRoute(
+                        'project-brief.show',
+                        now()->addDays(30),
+                        ['project' => $project->id],
+                    ),
+                );
+            }
         }
 
         return response()->json([

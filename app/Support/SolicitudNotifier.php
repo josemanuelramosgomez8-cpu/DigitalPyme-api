@@ -8,6 +8,7 @@ use App\Models\AgendaReservation;
 use App\Models\Cotizacion;
 use App\Models\Lead;
 use App\Models\SiteSetting;
+use App\Services\CustomerLifecycleNotifier;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
@@ -56,6 +57,22 @@ class SolicitudNotifier
                 'lead_id' => $lead->id,
                 'exception' => $exception->getMessage(),
             ]);
+        }
+
+        if (filled($lead->email)) {
+            app(CustomerLifecycleNotifier::class)->notify(
+                eventType: 'quote_request_received',
+                email: $lead->email,
+                subject: 'Recibimos tu solicitud de DigitalPyme',
+                intro: 'Gracias por contarnos sobre tu proyecto. El equipo revisará la información y se pondrá en contacto contigo.',
+                details: array_values(array_filter([
+                    'Solicitud: '.($cotizacion?->servicio ?? $lead->servicio),
+                    $cotizacion ? 'Referencia de solicitud: #'.$cotizacion->id : null,
+                ])),
+                userId: $lead->client?->user_id,
+                actionLabel: 'Conocer nuestros servicios',
+                actionUrl: rtrim(config('services.digitalpyme.frontend_url'), '/').'/',
+            );
         }
 
         $telefono = preg_replace('/\D+/', '', (string) SiteSetting::publicSettings()['contact']['whatsapp_phone']);

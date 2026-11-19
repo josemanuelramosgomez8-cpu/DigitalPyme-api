@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Project extends Model
 {
@@ -19,6 +20,7 @@ class Project extends Model
         'progreso',
         'fecha_inicio',
         'fecha_entrega',
+        'post_sale_scheduled_at',
     ];
 
     protected function casts(): array
@@ -27,6 +29,7 @@ class Project extends Model
             'progreso' => 'integer',
             'fecha_inicio' => 'date:Y-m-d',
             'fecha_entrega' => 'date:Y-m-d',
+            'post_sale_scheduled_at' => 'datetime',
         ];
     }
 
@@ -58,5 +61,10 @@ class Project extends Model
     public function payments(): HasMany
     {
         return $this->hasMany(ProjectPayment::class);
+    }
+
+    public function brief(): HasOne
+    {
+        return $this->hasOne(ProjectBrief::class);
     }
 }

@@ -2,6 +2,7 @@
 
 use App\Models\SiteSetting;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\ProjectBriefController;
 
 Route::get('/sitemap.xml', function () {
     $settings = SiteSetting::publicSettings();
@@ -31,3 +32,10 @@ Route::get('/robots.txt', function () {
 Route::get('/', function () {
     return view('welcome');
 });
+
+Route::get('/proyectos/{project}/brief', [ProjectBriefController::class, 'show'])
+    ->middleware('signed')
+    ->name('project-brief.show');
+Route::post('/proyectos/{project}/brief', [ProjectBriefController::class, 'store'])
+    ->middleware('signed')
+    ->name('project-brief.store');

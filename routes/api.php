@@ -4,7 +4,9 @@ use App\Http\Controllers\AdminDashboardController;
 use App\Http\Controllers\AgendaController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ClientController;
+use App\Http\Controllers\ClientNotificationController;
 use App\Http\Controllers\ClientMilestoneController;
+use App\Http\Controllers\ClientProjectDeliveryController;
 use App\Http\Controllers\CotizacionController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\PortfolioProjectController;
@@ -20,6 +22,7 @@ use App\Http\Controllers\ServiceReviewController;
 use App\Http\Controllers\ServicioController;
 use App\Http\Controllers\SiteSettingsController;
 use App\Http\Controllers\StoreLogisticsController;
+use App\Http\Controllers\StoreCartController;
 use App\Http\Controllers\StoreCouponController;
 use App\Http\Controllers\TestimonioController;
 use App\Http\Middleware\EnsureAdmin;
@@ -53,6 +56,12 @@ Route::get('/store/products', [StoreLogisticsController::class, 'publicProducts'
 Route::get('/store/products/{storeProduct}/image', [StoreLogisticsController::class, 'publicProductImage']);
 Route::get('/store/shipping-options', [StoreLogisticsController::class, 'shippingOptions']);
 Route::get('/store/payment-options', [StoreLogisticsController::class, 'paymentOptions']);
+Route::get('/store/carts/{storeCart}/restore', [StoreCartController::class, 'restore'])
+    ->middleware(['signed:relative', 'throttle:10,1'])
+    ->name('store.carts.restore');
+Route::get('/store/carts/{storeCart}/unsubscribe', [StoreCartController::class, 'unsubscribe'])
+    ->middleware(['signed:relative', 'throttle:5,1'])
+    ->name('store.carts.unsubscribe');
 
 // Solo con sesión iniciada
 Route::middleware('auth:sanctum')->group(function () {
@@ -143,6 +152,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::middleware(EnsureClient::class)->prefix('client')->group(function () {
         Route::put('/password', [AuthController::class, 'clientChangePassword'])->name('client.password');
         Route::get('/profile', [ClientController::class, 'profile']);
+        Route::get('/store/cart', [StoreCartController::class, 'show']);
+        Route::get('/notifications', [ClientNotificationController::class, 'index']);
+        Route::patch('/notifications/{notification}/read', [ClientNotificationController::class, 'markRead']);
+        Route::put('/store/cart', [StoreCartController::class, 'update']);
+        Route::delete('/store/cart', [StoreCartController::class, 'clear']);
         Route::post('/store/coupons/validate', [StoreCouponController::class, 'validateForCheckout'])->middleware('throttle:10,1');
         Route::get('/store/orders', [StoreLogisticsController::class, 'clientOrders']);
         Route::post('/store/orders', [StoreLogisticsController::class, 'checkout']);
@@ -153,6 +167,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/projects', [ProjectController::class, 'clientIndex']);
         Route::get('/projects/{project}', [ProjectController::class, 'clientShow']);
         Route::post('/projects/{project}/milestones/{milestone}/approve', [ClientMilestoneController::class, 'approve']);
+        Route::post('/projects/{project}/delivery-response', [ClientProjectDeliveryController::class, 'respond']);
         Route::get('/projects/{project}/payments', [ProjectPaymentController::class, 'clientIndex']);
         Route::post('/projects/{project}/payments/transfers', [ProjectPaymentController::class, 'startTransfer']);
         Route::post('/projects/{project}/payments/card', [ProjectPaymentController::class, 'startCardPayment']);

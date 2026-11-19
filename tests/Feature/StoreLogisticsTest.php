@@ -28,6 +28,7 @@ class StoreLogisticsTest extends TestCase
             'tipo_comprobante' => 'boleta',
             'tipo_documento' => 'dni',
             'numero_documento' => '12345678',
+            'acepta_politicas' => true,
         ];
     }
 
@@ -40,6 +41,47 @@ class StoreLogisticsTest extends TestCase
             'services.yape_plin.enabled' => true,
             'services.yape_plin.phone' => '999888777',
         ]);
+    }
+
+    public function test_checkout_requires_and_records_legal_policy_acceptance(): void
+    {
+        $user = User::factory()->create(['is_client' => true]);
+        Client::create(['user_id' => $user->id, 'nombre' => $user->name]);
+        $product = StoreProduct::create([
+            'sku' => 'LEGAL-CHECKOUT',
+            'nombre' => 'Producto con aceptación legal',
+            'precio' => 50,
+            'stock' => 2,
+        ]);
+        $payload = [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
+            'metodo_envio' => 'estandar',
+            'payment_method' => 'bank_transfer',
+            'ubicacion_entrega' => 'Lima',
+            'direccion_entrega' => 'Av. Demo 123',
+        ];
+        unset($payload['acepta_politicas']);
+
+        $this->actingAs($user)
+            ->postJson('/api/client/store/orders', $payload)
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['acepta_politicas']);
+
+        $payload['acepta_politicas'] = true;
+        $orderId = $this->actingAs($user)
+            ->postJson('/api/client/store/orders', $payload)
+            ->assertCreated()
+            ->json('id');
+
+        $this->assertDatabaseHas('store_orders', [
+            'id' => $orderId,
+            'legal_accepted_ip' => '127.0.0.1',
+            'legal_policy_version' => config('services.digitalpyme.legal_policy_version'),
+        ]);
+        $this->assertNotNull(
+            StoreOrder::query()->findOrFail($orderId)->legal_accepted_at,
+        );
     }
 
     public function test_shipping_options_and_free_shipping_threshold_are_configurable_by_admin(): void

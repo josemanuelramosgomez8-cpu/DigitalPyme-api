@@ -2,13 +2,17 @@
 
 namespace App\Http\Controllers;
 
+use App\Enums\StoreOrderStatus;
+use App\Events\StoreOrderStatusChanged;
 use App\Models\SiteSetting;
+use App\Models\StoreCart;
 use App\Models\StockMovement;
 use App\Models\StoreOrder;
 use App\Models\StoreProduct;
 use App\Models\StoreReturn;
 use App\Models\StoreCoupon;
 use App\Support\StoreOrderNotifier;
+use App\Http\Requests\StoreCheckoutRequest;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -99,25 +103,9 @@ class StoreLogisticsController extends Controller
         ];
     }
 
-    public function checkout(Request $request)
+    public function checkout(StoreCheckoutRequest $request)
     {
-        $data = $request->validate([
-            'items' => ['required', 'array', 'min:1', 'max:50'],
-            'items.*.product_id' => ['required', 'integer', 'distinct', 'exists:store_products,id'],
-            'items.*.cantidad' => ['required', 'integer', 'min:1', 'max:100'],
-            'metodo_envio' => ['required', Rule::in(self::SHIPPING_KEYS)],
-            'payment_method' => ['required', Rule::in(StoreOrder::PAYMENT_METHODS)],
-            'ubicacion_entrega' => ['required', 'string', 'max:120'],
-            'direccion_entrega' => ['required', 'string', 'max:255'],
-            'telefono' => ['required', 'string', 'regex:/^[0-9+()\s.-]{7,20}$/'],
-            'tipo_comprobante' => ['required', Rule::in(['boleta', 'factura'])],
-            'tipo_documento' => ['required', Rule::in(['dni', 'ruc'])],
-            'numero_documento' => ['required', 'string', 'max:20'],
-            'empresa_facturacion' => ['required_if:tipo_comprobante,factura', 'nullable', 'string', 'max:255'],
-            'coupon_code' => ['nullable', 'string', 'max:32'],
-            'tipo_operacion' => ['sometimes', Rule::in(['in-house', '3PL'])],
-            'operador_logistico' => ['required_if:tipo_operacion,3PL', 'nullable', 'string', 'max:120'],
-        ]);
+        $data = $request->validated();
 
         $documentLength = $data['tipo_documento'] === 'dni' ? 8 : 11;
         if (! ctype_digit($data['numero_documento']) || strlen($data['numero_documento']) !== $documentLength) {
@@ -230,6 +218,9 @@ class StoreLogisticsController extends Controller
                 'payment_method' => $data['payment_method'],
                 'payment_status' => 'pendiente',
                 'payment_due_at' => now()->addHours(24),
+                'legal_accepted_at' => now(),
+                'legal_accepted_ip' => $request->ip(),
+                'legal_policy_version' => config('services.digitalpyme.legal_policy_version'),
                 'tipo_operacion' => $data['tipo_operacion'] ?? 'in-house',
                 'operador_logistico' => ($data['tipo_operacion'] ?? 'in-house') === '3PL' ? $data['operador_logistico'] : null,
                 'metodo_envio' => $shippingMethod['key'],
@@ -262,6 +253,15 @@ class StoreLogisticsController extends Controller
                     'cantidad' => $quantity,
                     'motivo' => "Venta del pedido #{$order->id}",
                 ]);
+            }
+
+            $cart = StoreCart::query()
+                ->where('user_id', $request->user()->id)
+                ->lockForUpdate()
+                ->first();
+            if ($cart && $cart->recovered_at === null) {
+                $order->update(['store_cart_id' => $cart->id]);
+                $cart->update(['recovered_at' => now()]);
             }
 
             return $order;
@@ -656,20 +656,20 @@ class StoreLogisticsController extends Controller
     public function updateOrder(Request $request, StoreOrder $storeOrder)
     {
         $data = $request->validate([
-            'estado' => ['sometimes', 'required', Rule::in(StoreOrder::ESTADOS)],
+            'estado' => ['sometimes', 'required', Rule::enum(StoreOrderStatus::class)],
             'tipo_operacion' => ['sometimes', 'required', Rule::in(['in-house', '3PL'])],
             'operador_logistico' => ['nullable', 'string', 'max:120'],
             'codigo_rastreo' => ['nullable', 'string', 'max:120'],
         ]);
 
-        $order = DB::transaction(function () use ($storeOrder, $data) {
+        [$order, $previousStatus] = DB::transaction(function () use ($storeOrder, $data) {
             $order = StoreOrder::query()->lockForUpdate()->findOrFail($storeOrder->id);
+            $previousStatus = $order->estado;
             if (isset($data['estado']) && $data['estado'] !== $order->estado) {
                 if ($order->payment_status !== 'pagado') {
                     throw ValidationException::withMessages(['estado' => 'Confirma el pago antes de preparar o enviar el pedido.']);
                 }
-                $currentIndex = array_search($order->estado, StoreOrder::ESTADOS, true);
-                $nextState = $currentIndex === false ? null : (StoreOrder::ESTADOS[$currentIndex + 1] ?? null);
+                $nextState = StoreOrderStatus::tryFrom($order->estado)?->next()?->value;
                 if ($data['estado'] !== $nextState) {
                     throw ValidationException::withMessages(['estado' => 'El pedido debe avanzar un estado a la vez.']);
                 }
@@ -687,8 +687,12 @@ class StoreLogisticsController extends Controller
             if ($operation !== '3PL') $data['operador_logistico'] = null;
             $order->update($data);
 
-            return $order;
+            return [$order->refresh(), $previousStatus];
         });
+
+        if ($previousStatus !== $order->estado) {
+            event(new StoreOrderStatusChanged($order, $previousStatus, $order->estado));
+        }
 
         $response = $order->load(['client:id,nombre,empresa', 'items', 'returnRequest'])->toArray();
 

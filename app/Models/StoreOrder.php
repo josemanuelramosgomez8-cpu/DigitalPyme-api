@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\StoreOrderStatus;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -9,14 +10,13 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class StoreOrder extends Model
 {
-    public const ESTADOS = ['recibido', 'en_picking', 'empacado', 'enviado', 'entregado'];
-
     public const PAYMENT_METHODS = ['bank_transfer', 'yape_plin', 'card'];
 
     public const PAYMENT_STATUSES = ['pendiente', 'comprobante_enviado', 'pagado', 'rechazado', 'expirado'];
 
     protected $fillable = [
         'client_id',
+        'store_cart_id',
         'nombre_cliente',
         'email_cliente',
         'telefono_cliente',
@@ -38,6 +38,9 @@ class StoreOrder extends Model
         'receipt_uploaded_at',
         'paid_at',
         'payment_due_at',
+        'legal_accepted_at',
+        'legal_accepted_ip',
+        'legal_policy_version',
         'tipo_operacion',
         'operador_logistico',
         'metodo_envio',
@@ -70,6 +73,7 @@ class StoreOrder extends Model
             'receipt_uploaded_at' => 'datetime',
             'paid_at' => 'datetime',
             'payment_due_at' => 'datetime',
+            'legal_accepted_at' => 'datetime',
             'enviado_at' => 'datetime',
             'entregado_at' => 'datetime',
         ];
@@ -78,6 +82,11 @@ class StoreOrder extends Model
     public function client(): BelongsTo
     {
         return $this->belongsTo(Client::class);
+    }
+
+    public function storeCart(): BelongsTo
+    {
+        return $this->belongsTo(StoreCart::class);
     }
 
     public function items(): HasMany
