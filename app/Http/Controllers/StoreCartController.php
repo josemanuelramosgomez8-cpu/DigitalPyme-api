@@ -4,8 +4,10 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\UpdateStoreCartRequest;
 use App\Models\StoreCart;
+use App\Support\StoreCurrency;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class StoreCartController extends Controller
 {
@@ -30,6 +32,12 @@ class StoreCartController extends Controller
             $lockedUser = $user->newQuery()->lockForUpdate()->findOrFail($user->id);
             $cart = StoreCart::query()->where('user_id', $lockedUser->id)->lockForUpdate()->first()
                 ?? new StoreCart(['user_id' => $lockedUser->id]);
+            $currency = $data['currency'] ?? $cart->currency ?? 'PEN';
+            if ($currency === 'USD' && StoreCurrency::usdExchangeRate() === null) {
+                throw ValidationException::withMessages([
+                    'currency' => 'La visualización en USD no está disponible hasta configurar el tipo de cambio.',
+                ]);
+            }
             $consentedAt = $data['communications_consent']
                 ? ($cart->communications_consented_at ?? now())
                 : null;
@@ -37,7 +45,7 @@ class StoreCartController extends Controller
             $cart->fill([
                 'email' => $lockedUser->email,
                 'items' => $data['items'],
-                'currency' => 'PEN',
+                'currency' => $currency,
                 'last_activity_at' => now(),
                 'recovered_at' => null,
                 'communications_consented_at' => $consentedAt,

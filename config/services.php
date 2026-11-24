@@ -50,6 +50,10 @@ return [
         'return_url' => env('PAYMENT_RETURN_URL', 'http://localhost:8443'),
     ],
 
+    'store' => [
+        'usd_exchange_rate' => env('STORE_USD_EXCHANGE_RATE'),
+    ],
+
     'bank_transfer' => [
         'bank' => env('BANK_TRANSFER_BANK'),
         'holder' => env('BANK_TRANSFER_HOLDER'),

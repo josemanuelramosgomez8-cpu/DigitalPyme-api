@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class UpdateStoreCartRequest extends FormRequest
 {
@@ -18,6 +19,7 @@ class UpdateStoreCartRequest extends FormRequest
             'items.*.product_id' => ['required', 'integer', 'distinct', 'exists:store_products,id'],
             'items.*.cantidad' => ['required', 'integer', 'min:1', 'max:100'],
             'communications_consent' => ['required', 'boolean'],
+            'currency' => ['sometimes', 'required', Rule::in(['PEN', 'USD'])],
         ];
     }
 }

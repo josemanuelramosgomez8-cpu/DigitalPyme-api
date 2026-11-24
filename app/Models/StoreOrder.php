@@ -2,7 +2,7 @@
 
 namespace App\Models;
 
-use App\Enums\StoreOrderStatus;
+use App\Support\StoreCurrency;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -10,7 +10,7 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class StoreOrder extends Model
 {
-    public const PAYMENT_METHODS = ['bank_transfer', 'yape_plin', 'card'];
+    public const PAYMENT_METHODS = ['bank_transfer', 'yape_plin', 'card', 'direct_coordination'];
 
     public const PAYMENT_STATUSES = ['pendiente', 'comprobante_enviado', 'pagado', 'rechazado', 'expirado'];
 
@@ -38,6 +38,8 @@ class StoreOrder extends Model
         'receipt_uploaded_at',
         'paid_at',
         'payment_due_at',
+        'display_currency',
+        'display_exchange_rate',
         'legal_accepted_at',
         'legal_accepted_ip',
         'legal_policy_version',
@@ -73,9 +75,33 @@ class StoreOrder extends Model
             'receipt_uploaded_at' => 'datetime',
             'paid_at' => 'datetime',
             'payment_due_at' => 'datetime',
+            'display_exchange_rate' => 'decimal:6',
             'legal_accepted_at' => 'datetime',
             'enviado_at' => 'datetime',
             'entregado_at' => 'datetime',
+        ];
+    }
+
+    protected $appends = ['display_amounts'];
+
+    public function getDisplayAmountsAttribute(): array
+    {
+        $currency = $this->display_currency === 'USD' && $this->display_exchange_rate
+            ? 'USD'
+            : 'PEN';
+        $rate = $currency === 'USD' ? (string) $this->display_exchange_rate : null;
+        $convert = fn ($amount) => $currency === 'USD'
+            ? StoreCurrency::toUsd($amount, $rate)
+            : $amount;
+
+        return [
+            'currency' => $currency,
+            'exchange_rate' => $rate,
+            'subtotal' => $convert($this->subtotal),
+            'shipping' => $convert($this->costo_envio),
+            'discount' => $convert($this->discount_amount),
+            'igv' => $convert($this->igv_amount),
+            'total' => $convert($this->total),
         ];
     }
 

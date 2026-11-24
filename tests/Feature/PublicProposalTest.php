@@ -9,6 +9,7 @@ use App\Models\Servicio;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\RateLimiter;
 use Tests\TestCase;
 
 class PublicProposalTest extends TestCase
@@ -34,6 +35,9 @@ class PublicProposalTest extends TestCase
             'empresa' => 'Tienda de Ana',
             'servicios' => ['Páginas web', 'Tiendas en línea'],
             'metodo_pago_preferido' => 'card',
+            'plantilla_visual' => 'personalizada',
+            'color_primario' => '#123456',
+            'color_acento' => '#abcdef',
             'mensaje' => 'Necesito vender mis productos en línea.',
             'inversion_estimada' => 1,
         ]);
@@ -60,6 +64,9 @@ class PublicProposalTest extends TestCase
         $this->assertStringContainsString('Consentimientos registrados:', $lead->mensaje);
         $this->assertStringContainsString('Método de pago preferido (referencial): Tarjeta (Mercado Pago)', $lead->mensaje);
         $this->assertStringContainsString('Necesito vender mis productos en línea.', $quote->descripcion);
+        $this->assertStringContainsString('Plantilla visual seleccionada: Personalizada', $quote->descripcion);
+        $this->assertStringContainsString('Color principal de referencia: #123456', $quote->descripcion);
+        $this->assertStringContainsString('Color de acento de referencia: #abcdef', $lead->mensaje);
         $this->assertStringNotContainsString('Consentimientos registrados:', $quote->descripcion);
 
         Mail::assertSent(SolicitudRecibida::class, function (SolicitudRecibida $mail) {
@@ -89,6 +96,23 @@ class PublicProposalTest extends TestCase
             'servicios' => ['Páginas web'],
         ])->assertUnprocessable()
             ->assertJsonValidationErrors(['servicios']);
+
+        $this->assertDatabaseCount('leads', 0);
+        $this->assertDatabaseCount('cotizaciones', 0);
+    }
+
+    public function test_visual_template_and_custom_colors_are_validated(): void
+    {
+        Mail::fake();
+        $this->seed();
+
+        $this->postJson('/api/propuestas', [
+            ...$this->verifiedProposalPayload('plantilla@example.com'),
+            'servicios' => ['Páginas web'],
+            'plantilla_visual' => 'futurista',
+            'color_primario' => 'rojo',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['plantilla_visual', 'color_primario']);
 
         $this->assertDatabaseCount('leads', 0);
         $this->assertDatabaseCount('cotizaciones', 0);
@@ -262,16 +286,20 @@ class PublicProposalTest extends TestCase
 
     private function verifiedProposalPayload(string $email): array
     {
+        $emailIpHash = hash('sha256', mb_strtolower(trim($email)).'|127.0.0.1');
+        RateLimiter::clear('public-quote:verification:send:'.$emailIpHash);
+        RateLimiter::clear('public-quote:verification:cooldown:'.$emailIpHash);
+
         $this->postJson('/api/propuestas/codigo', [
             'email' => $email,
             'website' => '',
         ])->assertOk();
 
         $code = null;
-        Mail::assertSent(CodigoVerificacionCotizacion::class, function (CodigoVerificacionCotizacion $mail) use (&$code) {
+        Mail::assertSent(CodigoVerificacionCotizacion::class, function (CodigoVerificacionCotizacion $mail) use (&$code, $email) {
             $code = $mail->code;
 
-            return true;
+            return $mail->hasTo($email);
         });
 
         $verification = $this->postJson('/api/propuestas/verificar-codigo', [

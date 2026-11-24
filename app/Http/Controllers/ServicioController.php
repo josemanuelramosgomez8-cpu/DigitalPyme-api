@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Servicio;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
@@ -43,7 +44,12 @@ class ServicioController extends Controller
     // Administrador: todos, incluidos los desactivados
     public function index()
     {
-        return response()->json(Servicio::orderBy('orden')->orderBy('id')->get());
+        return response()->json(
+            Servicio::with(['category', 'subcategory', 'planificacion'])
+                ->orderBy('orden')
+                ->orderBy('id')
+                ->get()
+        );
     }
 
     public function store(Request $request)
@@ -60,9 +66,17 @@ class ServicioController extends Controller
             'etiqueta' => ['nullable', Rule::in(['Nuevo', 'Más vendido', '-20%', 'Destacado'])],
             'category_id' => 'nullable|exists:service_categories,id',
             'subcategory_id' => 'nullable|exists:service_subcategories,id',
+            'planificacion' => 'sometimes|nullable|array:prioridad,estandarizacion,estado_preparacion,tiempo_estimado_dias',
+            'planificacion.prioridad' => ['nullable', 'string', Rule::in(['alta', 'media', 'baja'])],
+            'planificacion.estandarizacion' => ['nullable', 'string', Rule::in(['plantilla', 'a_medida'])],
+            'planificacion.estado_preparacion' => ['nullable', 'string', Rule::in(['disponible', 'en_preparacion', 'pausado'])],
+            'planificacion.tiempo_estimado_dias' => 'nullable|integer|min:1|max:3650',
             'activo'       => 'boolean',
             'orden'        => 'integer|min:0',
         ]);
+        $planificacion = $datos['planificacion'] ?? null;
+        unset($datos['planificacion']);
+
         if (!empty($datos['subcategory_id'])) {
             $subcategory = \App\Models\ServiceSubcategory::findOrFail($datos['subcategory_id']);
             if (!empty($datos['category_id']) && (int) $datos['category_id'] !== $subcategory->category_id) {
@@ -72,7 +86,17 @@ class ServicioController extends Controller
         }
         $datos['slug'] = $this->availableSlug($datos['slug'] ?? $datos['nombre']);
 
-        return response()->json(Servicio::create($datos), 201);
+        return DB::transaction(function () use ($datos, $planificacion) {
+            $servicio = Servicio::create($datos);
+            if (is_array($planificacion)) {
+                $servicio->planificacion()->create($planificacion);
+            }
+
+            return response()->json(
+                $servicio->load(['category', 'subcategory', 'planificacion']),
+                201
+            );
+        });
     }
 
     public function update(Request $request, Servicio $servicio)
@@ -89,9 +113,17 @@ class ServicioController extends Controller
             'etiqueta' => ['nullable', Rule::in(['Nuevo', 'Más vendido', '-20%', 'Destacado'])],
             'category_id' => 'nullable|exists:service_categories,id',
             'subcategory_id' => 'nullable|exists:service_subcategories,id',
+            'planificacion' => 'sometimes|nullable|array:prioridad,estandarizacion,estado_preparacion,tiempo_estimado_dias',
+            'planificacion.prioridad' => ['nullable', 'string', Rule::in(['alta', 'media', 'baja'])],
+            'planificacion.estandarizacion' => ['nullable', 'string', Rule::in(['plantilla', 'a_medida'])],
+            'planificacion.estado_preparacion' => ['nullable', 'string', Rule::in(['disponible', 'en_preparacion', 'pausado'])],
+            'planificacion.tiempo_estimado_dias' => 'nullable|integer|min:1|max:3650',
             'activo'       => 'boolean',
             'orden'        => 'integer|min:0',
         ]);
+        $planificacion = $datos['planificacion'] ?? null;
+        $actualizaPlanificacion = array_key_exists('planificacion', $datos) && is_array($planificacion);
+        unset($datos['planificacion']);
 
         $categoryId = $datos['category_id'] ?? $servicio->category_id;
         $subcategoryId = $datos['subcategory_id'] ?? $servicio->subcategory_id;
@@ -111,9 +143,17 @@ class ServicioController extends Controller
         if (array_key_exists('slug', $datos) && !$datos['slug']) {
             $datos['slug'] = $this->availableSlug($datos['nombre'] ?? $servicio->nombre, $servicio->id);
         }
-        $servicio->update($datos);
 
-        return response()->json($servicio);
+        return DB::transaction(function () use ($datos, $planificacion, $actualizaPlanificacion, $servicio) {
+            $servicio->update($datos);
+            if ($actualizaPlanificacion) {
+                $servicio->planificacion()->updateOrCreate([], $planificacion);
+            }
+
+            return response()->json(
+                $servicio->fresh(['category', 'subcategory', 'planificacion'])
+            );
+        });
     }
 
     public function destroy(Servicio $servicio)

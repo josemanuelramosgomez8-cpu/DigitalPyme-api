@@ -45,6 +45,7 @@ class SiteSetting extends Model
                 'digital_mode' => 'virtual_presencial_lima',
                 'shipping_zones' => [],
                 'shipping_methods' => [
+                    ['key' => 'recojo', 'nombre' => 'Recojo', 'cost' => 0, 'delivery_days' => 0, 'enabled' => true],
                     ['key' => 'estandar', 'nombre' => 'Estándar', 'cost' => 12, 'delivery_days' => 3, 'enabled' => true],
                     ['key' => 'express', 'nombre' => 'Express', 'cost' => 20, 'delivery_days' => 1, 'enabled' => true],
                     ['key' => 'same_day', 'nombre' => 'Same-day', 'cost' => 28, 'delivery_days' => 0, 'enabled' => true],
@@ -77,7 +78,7 @@ POLICY,
                 'version' => config('services.digitalpyme.legal_policy_version', '2026-11-19'),
                 'warranty' => 'La garantía y el alcance del soporte se detallan en cada propuesta aprobada. Antes de contratar, confirma por escrito las condiciones aplicables a tu proyecto.',
                 'terms' => "Estas condiciones describen el uso del sitio y la contratación de los servicios y productos de DigitalPyme. Las propuestas aprobadas detallan el alcance, entregables, plazos, precio y condiciones particulares; si existe una diferencia, solicita una aclaración por escrito antes de pagar. El trabajo comienza después de la aceptación formal y del cumplimiento de las condiciones indicadas en la propuesta.\n\nLa persona que compra debe proporcionar información correcta y conservar sus comprobantes. Los plazos dependen de la entrega oportuna de materiales, accesos y aprobaciones del cliente. DigitalPyme informará cualquier cambio relevante antes de aplicarlo.\n\n[REVISAR LEGAL: completar razón social, RUC, domicilio, jurisdicción, canales de atención y condiciones aplicables a consumidores antes de publicar.]",
-                'payments' => "El precio, moneda, impuestos y costos de envío aplicables se muestran antes de confirmar el pedido. La tienda física opera actualmente en soles (PEN); el IGV y cualquier descuento se desglosan en el resumen. Los medios disponibles pueden incluir tarjeta procesada por Mercado Pago, transferencia bancaria y Yape/Plin, según su configuración.\n\nLos pagos manuales quedan pendientes hasta que DigitalPyme revise el comprobante. Los pedidos impagos pueden vencer en el plazo informado durante la compra. El resumen enviado por correo es informativo y no reemplaza el comprobante electrónico que corresponda.\n\n[REVISAR LEGAL: verificar precios con impuestos, emisión de comprobantes, medios y plazos de pago vigentes.]",
+                'payments' => "Los precios base de la tienda están en soles (PEN). Si se muestra una conversión referencial a dólares (USD), se calcula con el tipo de cambio configurado y el pedido se confirma y cobra en PEN; el monto exacto en PEN, los impuestos y el envío se muestran antes de confirmar. El IGV y cualquier descuento se desglosan en el resumen. Los medios disponibles pueden incluir tarjeta procesada por Mercado Pago, transferencia bancaria y Yape/Plin, según su configuración.\n\nLos pagos manuales quedan pendientes hasta que DigitalPyme revise el comprobante. Los pedidos impagos pueden vencer en el plazo informado durante la compra. El resumen enviado por correo es informativo y no reemplaza el comprobante electrónico que corresponda.\n\n[REVISAR LEGAL: verificar precios con impuestos, emisión de comprobantes, medios y plazos de pago vigentes.]",
                 'returns' => "Puedes solicitar la devolución de un pedido entregado desde el Portal cliente e indicar el motivo. El equipo revisará la solicitud y te informará si fue aprobada. La resolución puede ser reventa, reparación, desecho o reembolso, según la inspección y las condiciones aplicables. Esta guía no limita los derechos que correspondan conforme a la normativa vigente.\n\n[REVISAR LEGAL: definir plazos, exclusiones y procedimiento de cambios, cancelaciones y reembolsos antes de publicar.]",
                 'revisions' => "La cantidad de revisiones, los entregables y las fechas se especifican en la propuesta aceptada. El cliente debe enviar observaciones consolidadas dentro del plazo acordado. La aprobación de una entrega confirma que se recibió el hito descrito; las solicitudes fuera del alcance pueden requerir una nueva cotización.\n\n[REVISAR LEGAL: definir plazos de revisión, aceptación tácita y costos de cambios adicionales.]",
                 'intellectual_property' => "Los derechos sobre materiales preexistentes pertenecen a sus titulares. La titularidad o licencia de uso de los entregables se determinará en la propuesta o contrato aceptado y podrá depender del pago total. El cliente declara contar con autorización para los materiales que entrega a DigitalPyme.\n\n[REVISAR LEGAL: establecer titularidad, licencias, portafolio, tipografías, recursos de terceros y momento de transferencia.]",
@@ -88,6 +89,21 @@ POLICY,
     }
 
     public static function publicSettings(): array
+    {
+        $settings = static::settings();
+        if (! ($settings['legal']['privacy_published'] ?? false)) {
+            $settings['legal']['privacy'] = null;
+        }
+
+        return $settings;
+    }
+
+    public static function adminSettings(): array
+    {
+        return static::settings();
+    }
+
+    private static function settings(): array
     {
         $saved = static::query()->find('public')?->value ?? [];
         $settings = array_replace_recursive(static::defaults(), $saved);
@@ -101,7 +117,13 @@ POLICY,
         $settings['seo']['slug'] ??= '';
         $settings['seo']['og_image'] ??= '';
         $settings['brand']['logo_url'] ??= '';
-        $settings['coverage']['shipping_methods'] ??= static::defaults()['coverage']['shipping_methods'];
+        $defaultMethods = static::defaults()['coverage']['shipping_methods'];
+        $savedMethods = $settings['coverage']['shipping_methods'] ?? [];
+        $savedMethodsByKey = collect($savedMethods)->keyBy('key');
+        $settings['coverage']['shipping_methods'] = collect($defaultMethods)
+            ->map(fn (array $default) => array_replace($default, (array) ($savedMethodsByKey->get($default['key']) ?? [])))
+            ->values()
+            ->all();
         $settings['coverage']['free_shipping_threshold'] ??= static::defaults()['coverage']['free_shipping_threshold'];
         $settings['legal']['returns'] ??= static::defaults()['legal']['returns'];
         $settings['legal']['payments'] ??= static::defaults()['legal']['payments'];
@@ -116,7 +138,7 @@ POLICY,
 
     public static function savePublicSettings(array $settings): array
     {
-        $merged = static::publicSettings();
+        $merged = static::adminSettings();
         foreach ($settings as $section => $values) {
             $merged[$section] = is_array($values) && is_array($merged[$section] ?? null)
                 ? array_replace($merged[$section], $values)
@@ -128,6 +150,6 @@ POLICY,
             ['value' => $merged],
         );
 
-        return static::publicSettings();
+        return static::adminSettings();
     }
 }

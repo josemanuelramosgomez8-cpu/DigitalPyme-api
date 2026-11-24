@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Servicio extends Model
 {
@@ -42,6 +43,16 @@ class Servicio extends Model
     public function subcategory(): BelongsTo
     {
         return $this->belongsTo(ServiceSubcategory::class, 'subcategory_id');
+    }
+
+    public function planificacion(): HasOne
+    {
+        return $this->hasOne(ServicePlanning::class, 'servicio_id');
+    }
+
+    public function inventory(): HasOne
+    {
+        return $this->hasOne(ServiceInventory::class, 'servicio_id');
     }
 
     public function reviews(): HasMany

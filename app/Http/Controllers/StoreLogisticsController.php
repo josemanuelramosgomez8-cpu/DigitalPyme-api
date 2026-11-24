@@ -12,7 +12,9 @@ use App\Models\StoreProduct;
 use App\Models\StoreReturn;
 use App\Models\StoreCoupon;
 use App\Support\StoreOrderNotifier;
+use App\Support\StoreCurrency;
 use App\Http\Requests\StoreCheckoutRequest;
+use App\Http\Requests\StoreShippingQuoteRequest;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -27,8 +29,6 @@ use Throwable;
 
 class StoreLogisticsController extends Controller
 {
-    private const SHIPPING_KEYS = ['estandar', 'express', 'same_day'];
-
     public function publicProducts()
     {
         return response()->json(StoreProduct::query()
@@ -43,6 +43,7 @@ class StoreLogisticsController extends Controller
                 'descripcion' => $product->descripcion,
                 'categoria' => $product->categoria,
                 'precio' => $product->precio,
+                'precio_usd' => StoreCurrency::toUsd($product->precio),
                 'stock' => $product->stock,
                 'imagen_url' => $product->image_path ? url("/api/store/products/{$product->id}/image") : null,
             ]));
@@ -71,6 +72,114 @@ class StoreLogisticsController extends Controller
         ]);
     }
 
+    public function shippingQuote(StoreShippingQuoteRequest $request)
+    {
+        $data = $request->validated();
+        $cart = StoreCart::query()->where('user_id', $request->user()->id)->first();
+        $items = $cart?->items ?? [];
+        if ($items === []) {
+            throw ValidationException::withMessages([
+                'items' => 'Agrega productos al carrito antes de calcular el envío.',
+            ]);
+        }
+
+        $coverage = SiteSetting::publicSettings()['coverage'];
+        $shipping = $this->resolveShippingSelection(
+            $coverage,
+            $data['metodo_envio'],
+            $data['ubicacion_entrega'],
+        );
+        $displayCurrency = $data['currency'] ?? $cart?->currency ?? 'PEN';
+        $exchangeRate = $displayCurrency === 'USD' ? StoreCurrency::usdExchangeRate() : null;
+        if ($displayCurrency === 'USD' && $exchangeRate === null) {
+            throw ValidationException::withMessages([
+                'currency' => 'La visualización en USD no está disponible hasta configurar el tipo de cambio.',
+            ]);
+        }
+
+        $products = StoreProduct::query()
+            ->whereIn('id', array_column($items, 'product_id'))
+            ->get()
+            ->keyBy('id');
+        $subtotalCents = 0;
+        foreach ($items as $item) {
+            $product = $products->get($item['product_id']);
+            if (! $product || ! $product->activo || $product->stock < $item['cantidad']) {
+                throw ValidationException::withMessages([
+                    'items' => $product
+                        ? "Stock insuficiente para {$product->nombre}."
+                        : 'Uno de los productos ya no está disponible.',
+                ]);
+            }
+
+            $subtotalCents += self::amountToCents($product->precio) * $item['cantidad'];
+        }
+
+        $coupon = null;
+        $discountCents = 0;
+        if (filled($data['coupon_code'] ?? null)) {
+            $coupon = StoreCoupon::query()
+                ->where('code', strtoupper(trim($data['coupon_code'])))
+                ->first();
+
+            if (! $coupon || ! $coupon->isAvailable()) {
+                throw ValidationException::withMessages([
+                    'coupon_code' => 'El cupón no existe, venció o no está activo.',
+                ]);
+            }
+
+            $discountCents = StoreCouponController::discountCents($coupon, $subtotalCents);
+        }
+
+        $discountedSubtotalCents = $subtotalCents - $discountCents;
+        $shippingAmounts = $this->calculateShippingCents(
+            $coverage,
+            $shipping['method'],
+            $shipping['zone'],
+            $discountedSubtotalCents,
+        );
+        $shippingCents = $shippingAmounts['cost_cents'];
+        $taxableBaseCents = $discountedSubtotalCents + $shippingCents;
+        $igvCents = intdiv(($taxableBaseCents * 18) + 50, 100);
+        $totalCents = $taxableBaseCents + $igvCents;
+        $toDisplayCurrency = fn (int $cents) => $displayCurrency === 'USD'
+            ? StoreCurrency::toUsd(self::centsToAmount($cents), $exchangeRate)
+            : self::centsToAmount($cents);
+
+        return response()->json([
+            'subtotal' => self::centsToAmount($subtotalCents),
+            'costo_envio' => self::centsToAmount($shippingCents),
+            'discount_amount' => self::centsToAmount($discountCents),
+            'coupon_code' => $coupon?->code,
+            'igv_rate' => 18,
+            'igv_amount' => self::centsToAmount($igvCents),
+            'total' => self::centsToAmount($totalCents),
+            'payment_currency' => 'PEN',
+            'display_currency' => $displayCurrency,
+            'display_exchange_rate' => $exchangeRate,
+            'display_amounts' => [
+                'currency' => $displayCurrency,
+                'exchange_rate' => $exchangeRate,
+                'subtotal' => $toDisplayCurrency($subtotalCents),
+                'shipping' => $toDisplayCurrency($shippingCents),
+                'discount' => $toDisplayCurrency($discountCents),
+                'igv' => $toDisplayCurrency($igvCents),
+                'total' => $toDisplayCurrency($totalCents),
+            ],
+            'shipping' => [
+                'method' => $shipping['method']['key'],
+                'method_name' => $shipping['method']['nombre'],
+                'location' => $shipping['zone']['location'] ?? $data['ubicacion_entrega'],
+                'zone_configured' => $shipping['zone'] !== null,
+                'delivery_days' => $shipping['method']['key'] === 'recojo'
+                    ? $shipping['method']['delivery_days']
+                    : ($shipping['zone']['delivery_days'] ?? $shipping['method']['delivery_days']),
+                'free_shipping_applied' => $shippingAmounts['free_shipping'],
+            ],
+            'stock_reserved' => false,
+        ]);
+    }
+
     public function paymentOptions()
     {
         return response()->json($this->configuredPaymentOptions());
@@ -80,6 +189,7 @@ class StoreLogisticsController extends Controller
     {
         $bankTransfer = config('services.bank_transfer');
         $yapePlin = config('services.yape_plin');
+        $contact = SiteSetting::publicSettings()['contact'];
         $bankEnabled = filled($bankTransfer['account']) || filled($bankTransfer['cci']);
         $yapeEnabled = (bool) $yapePlin['enabled'] && filled($yapePlin['phone']);
 
@@ -87,6 +197,13 @@ class StoreLogisticsController extends Controller
             'card_enabled' => filled(config('services.mercadopago.access_token')),
             'card_environment' => config('services.mercadopago.environment', 'sandbox'),
             'igv_rate' => 18,
+            'currencies' => StoreCurrency::options(),
+            'direct_coordination' => [
+                'enabled' => true,
+                'instructions' => 'Envía el pedido y DigitalPyme confirmará disponibilidad y coordinará contigo las instrucciones de pago. No se realizará un cobro automático.',
+                'whatsapp_phone' => $contact['whatsapp_phone'],
+                'contact_email' => config('services.digitalpyme.solicitudes_email'),
+            ],
             'bank_transfer' => [
                 'enabled' => $bankEnabled,
                 'bank' => $bankEnabled ? $bankTransfer['bank'] : null,
@@ -122,17 +239,13 @@ class StoreLogisticsController extends Controller
         }
 
         $coverage = SiteSetting::publicSettings()['coverage'];
-        $shippingMethod = collect($coverage['shipping_methods'])->firstWhere('key', $data['metodo_envio']);
-        if (!$shippingMethod || !$shippingMethod['enabled']) {
-            throw ValidationException::withMessages(['metodo_envio' => 'La opción de envío seleccionada no está disponible.']);
-        }
-        $shippingZone = collect($coverage['shipping_zones'])->first(
-            fn (array $zone) => Str::lower(trim($zone['location'])) === Str::lower(trim($data['ubicacion_entrega']))
+        $shipping = $this->resolveShippingSelection(
+            $coverage,
+            $data['metodo_envio'],
+            $data['ubicacion_entrega'],
         );
-        $standardShippingMethod = collect($coverage['shipping_methods'])->firstWhere('key', 'estandar');
-        if ($data['metodo_envio'] === 'same_day' && !Str::contains(Str::lower($data['ubicacion_entrega']), 'lima')) {
-            throw ValidationException::withMessages(['metodo_envio' => 'El envío Same-day solo está disponible para Lima.']);
-        }
+        $shippingMethod = $shipping['method'];
+        $shippingZone = $shipping['zone'];
         $paymentOptions = $this->configuredPaymentOptions();
         $paymentMethodEnabled = $data['payment_method'] === 'card'
             ? $paymentOptions['card_enabled']
@@ -143,7 +256,19 @@ class StoreLogisticsController extends Controller
             ]);
         }
 
-        $order = DB::transaction(function () use ($request, $data, $coverage, $shippingMethod, $shippingZone, $standardShippingMethod) {
+        $order = DB::transaction(function () use ($request, $data, $coverage, $shippingMethod, $shippingZone) {
+            $cart = StoreCart::query()
+                ->where('user_id', $request->user()->id)
+                ->lockForUpdate()
+                ->first();
+            $displayCurrency = $data['currency'] ?? $cart?->currency ?? 'PEN';
+            $exchangeRate = $displayCurrency === 'USD' ? StoreCurrency::usdExchangeRate() : null;
+            if ($displayCurrency === 'USD' && $exchangeRate === null) {
+                throw ValidationException::withMessages([
+                    'currency' => 'La visualización en USD no está disponible hasta configurar el tipo de cambio.',
+                ]);
+            }
+
             $lockedProducts = [];
             $subtotalCents = 0;
             $productIds = array_column($data['items'], 'product_id');
@@ -184,15 +309,14 @@ class StoreLogisticsController extends Controller
                 $discountCents = StoreCouponController::discountCents($coupon, $subtotalCents);
             }
 
-            $zoneBaseCents = $shippingZone
-                ? self::amountToCents($shippingZone['fee'])
-                : self::amountToCents($standardShippingMethod['cost'] ?? $shippingMethod['cost']);
-            $standardCostCents = self::amountToCents($standardShippingMethod['cost'] ?? $shippingMethod['cost']);
-            $methodSurchargeCents = self::amountToCents($shippingMethod['cost']) - $standardCostCents;
             $discountedSubtotalCents = $subtotalCents - $discountCents;
-            $shippingCostCents = $discountedSubtotalCents >= self::amountToCents($coverage['free_shipping_threshold'])
-                ? 0
-                : max(0, $zoneBaseCents + $methodSurchargeCents);
+            $shippingAmounts = $this->calculateShippingCents(
+                $coverage,
+                $shippingMethod,
+                $shippingZone,
+                $discountedSubtotalCents,
+            );
+            $shippingCostCents = $shippingAmounts['cost_cents'];
             $taxableBaseCents = $discountedSubtotalCents + $shippingCostCents;
             $igvCents = intdiv(($taxableBaseCents * 18) + 50, 100);
             $client = $request->user()->client;
@@ -217,6 +341,8 @@ class StoreLogisticsController extends Controller
                 'estado' => 'recibido',
                 'payment_method' => $data['payment_method'],
                 'payment_status' => 'pendiente',
+                'display_currency' => $displayCurrency,
+                'display_exchange_rate' => $exchangeRate,
                 'payment_due_at' => now()->addHours(24),
                 'legal_accepted_at' => now(),
                 'legal_accepted_ip' => $request->ip(),
@@ -255,10 +381,6 @@ class StoreLogisticsController extends Controller
                 ]);
             }
 
-            $cart = StoreCart::query()
-                ->where('user_id', $request->user()->id)
-                ->lockForUpdate()
-                ->first();
             if ($cart && $cart->recovered_at === null) {
                 $order->update(['store_cart_id' => $cart->id]);
                 $cart->update(['recovered_at' => now()]);
@@ -272,8 +394,72 @@ class StoreLogisticsController extends Controller
             'items' => fn ($query) => $query->orderBy('id'),
         ])->toArray();
         $response['email_enviado'] = $emailSent;
+        if ($order->payment_method === 'direct_coordination') {
+            $response['coordinacion'] = $this->directCoordinationDetails($order);
+        }
 
         return response()->json($response, 201);
+    }
+
+    private function directCoordinationDetails(StoreOrder $order): array
+    {
+        $contact = SiteSetting::publicSettings()['contact'];
+        $whatsappPhone = $contact['whatsapp_phone'];
+        $whatsappNumber = preg_replace('/\D+/', '', (string) $whatsappPhone);
+        $message = "Hola, envié el pedido #{$order->id} a DigitalPyme y quisiera coordinar disponibilidad y pago.";
+
+        return [
+            'mensaje' => 'No se realizó ningún cobro automático. DigitalPyme confirmará disponibilidad y coordinará contigo las instrucciones de pago.',
+            'email' => config('services.digitalpyme.solicitudes_email'),
+            'whatsapp_phone' => $whatsappPhone,
+            'whatsapp_url' => $whatsappNumber
+                ? 'https://wa.me/'.$whatsappNumber.'?text='.rawurlencode($message)
+                : null,
+            'fecha_limite_reserva' => $order->payment_due_at?->toIso8601String(),
+            'display_amounts' => $order->display_amounts,
+            'total_pen' => $order->total,
+        ];
+    }
+
+    private function resolveShippingSelection(array $coverage, string $methodKey, string $location): array
+    {
+        $shippingMethod = collect($coverage['shipping_methods'] ?? [])->firstWhere('key', $methodKey);
+        if (! $shippingMethod || ! $shippingMethod['enabled']) {
+            throw ValidationException::withMessages([
+                'metodo_envio' => 'La opción de envío seleccionada no está disponible.',
+            ]);
+        }
+
+        $shippingZone = collect($coverage['shipping_zones'] ?? [])->first(
+            fn (array $zone) => Str::lower(trim($zone['location'])) === Str::lower(trim($location))
+        );
+        if ($methodKey === 'same_day' && ! Str::contains(Str::lower($location), 'lima')) {
+            throw ValidationException::withMessages([
+                'metodo_envio' => 'El envío Same-day solo está disponible para Lima.',
+            ]);
+        }
+
+        return ['method' => $shippingMethod, 'zone' => $shippingZone];
+    }
+
+    private function calculateShippingCents(
+        array $coverage,
+        array $shippingMethod,
+        ?array $shippingZone,
+        int $discountedSubtotalCents,
+    ): array {
+        $standardShippingMethod = collect($coverage['shipping_methods'] ?? [])->firstWhere('key', 'estandar');
+        $standardCostCents = self::amountToCents($standardShippingMethod['cost'] ?? $shippingMethod['cost']);
+        $zoneBaseCents = $shippingZone
+            ? self::amountToCents($shippingZone['fee'])
+            : $standardCostCents;
+        $methodSurchargeCents = self::amountToCents($shippingMethod['cost']) - $standardCostCents;
+        $freeShipping = $discountedSubtotalCents >= self::amountToCents($coverage['free_shipping_threshold'] ?? 0);
+
+        return [
+            'cost_cents' => $freeShipping ? 0 : max(0, $zoneBaseCents + $methodSurchargeCents),
+            'free_shipping' => $freeShipping,
+        ];
     }
 
     public function startCardPayment(Request $request, StoreOrder $storeOrder)
@@ -714,9 +900,9 @@ class StoreLogisticsController extends Controller
             $previousPath = DB::transaction(function () use ($request, $storeOrder, $file, $path) {
                 $order = StoreOrder::query()->lockForUpdate()->findOrFail($storeOrder->id);
                 abort_unless($order->client_id === $request->user()->client->id, 404);
-                if (! in_array($order->payment_method, ['bank_transfer', 'yape_plin'], true)) {
+                if (! in_array($order->payment_method, ['bank_transfer', 'yape_plin', 'direct_coordination'], true)) {
                     throw ValidationException::withMessages([
-                        'file' => 'Los pagos con tarjeta no admiten comprobantes manuales.',
+                        'file' => 'Este método de pago no admite comprobantes manuales.',
                     ]);
                 }
                 if (! in_array($order->payment_status, ['pendiente', 'rechazado'], true)) {

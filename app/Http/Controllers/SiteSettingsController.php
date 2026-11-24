@@ -19,7 +19,7 @@ class SiteSettingsController extends Controller
 
     public function adminShow()
     {
-        return response()->json(SiteSetting::publicSettings());
+        return response()->json(SiteSetting::adminSettings());
     }
 
     public function update(Request $request)
@@ -46,8 +46,8 @@ class SiteSettingsController extends Controller
             'coverage.shipping_zones.*.location' => ['required', 'string', 'max:120'],
             'coverage.shipping_zones.*.fee' => ['required', 'numeric', 'decimal:0,2', 'min:0', 'max:999999'],
             'coverage.shipping_zones.*.delivery_days' => ['nullable', 'integer', 'min:0', 'max:365'],
-            'coverage.shipping_methods' => ['sometimes', 'array', 'size:3'],
-            'coverage.shipping_methods.*.key' => ['required', Rule::in(['estandar', 'express', 'same_day']), 'distinct'],
+            'coverage.shipping_methods' => ['sometimes', 'array', 'size:4'],
+            'coverage.shipping_methods.*.key' => ['required', Rule::in(['recojo', 'estandar', 'express', 'same_day']), 'distinct'],
             'coverage.shipping_methods.*.nombre' => ['required', 'string', 'max:80'],
             'coverage.shipping_methods.*.cost' => ['required', 'numeric', 'decimal:0,2', 'min:0', 'max:999999'],
             'coverage.shipping_methods.*.delivery_days' => ['required', 'integer', 'min:0', 'max:365'],

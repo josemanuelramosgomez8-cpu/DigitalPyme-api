@@ -18,6 +18,7 @@ use App\Http\Controllers\ProjectPaymentController;
 use App\Http\Controllers\PublicQuoteController;
 use App\Http\Controllers\PublicQuoteVerificationController;
 use App\Http\Controllers\ServiceCategoryController;
+use App\Http\Controllers\ServiceInventoryController;
 use App\Http\Controllers\ServiceReviewController;
 use App\Http\Controllers\ServicioController;
 use App\Http\Controllers\SiteSettingsController;
@@ -70,6 +71,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::middleware(EnsureAdmin::class)->group(function () {
         Route::get('/admin/dashboard', [AdminDashboardController::class, 'show']);
+        Route::get('/admin/notifications', [ClientNotificationController::class, 'index']);
+        Route::patch('/admin/notifications/{notification}/read', [ClientNotificationController::class, 'markRead']);
         Route::get('/admin/site-settings', [SiteSettingsController::class, 'adminShow']);
         Route::get('/admin/store', [StoreLogisticsController::class, 'adminIndex']);
         Route::post('/admin/store/coupons', [StoreCouponController::class, 'store']);
@@ -107,6 +110,13 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/admin/agenda/reservas/{reservation}', [AgendaController::class, 'cancelReservation']);
         Route::get('/admin/inventario/proyectos', [ProjectCapacityController::class, 'show']);
         Route::put('/admin/inventario/proyectos', [ProjectCapacityController::class, 'update']);
+        Route::get('/admin/inventario/servicios', [ServiceInventoryController::class, 'index']);
+        Route::put('/admin/inventario/servicios/{resourceType}/{resourceId}/umbral', [ServiceInventoryController::class, 'updateMinimum'])
+            ->whereIn('resourceType', ['servicio', 'subcategoria'])
+            ->whereNumber('resourceId');
+        Route::post('/admin/inventario/servicios/{resourceType}/{resourceId}/movimientos', [ServiceInventoryController::class, 'storeMovement'])
+            ->whereIn('resourceType', ['servicio', 'subcategoria'])
+            ->whereNumber('resourceId');
 
         Route::get('/admin/servicios', [ServicioController::class, 'index']);
         Route::post('/admin/servicios', [ServicioController::class, 'store']);
@@ -157,6 +167,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::patch('/notifications/{notification}/read', [ClientNotificationController::class, 'markRead']);
         Route::put('/store/cart', [StoreCartController::class, 'update']);
         Route::delete('/store/cart', [StoreCartController::class, 'clear']);
+        Route::post('/store/shipping-quote', [StoreLogisticsController::class, 'shippingQuote'])->middleware('throttle:10,1');
         Route::post('/store/coupons/validate', [StoreCouponController::class, 'validateForCheckout'])->middleware('throttle:10,1');
         Route::get('/store/orders', [StoreLogisticsController::class, 'clientOrders']);
         Route::post('/store/orders', [StoreLogisticsController::class, 'checkout']);

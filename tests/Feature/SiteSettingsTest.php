@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Models\Servicio;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -46,6 +47,18 @@ class SiteSettingsTest extends TestCase
             ->assertOk()
             ->assertJsonPath('legal.privacy', $draft)
             ->assertJsonPath('legal.privacy_published', false);
+
+        $admin = User::factory()->create(['is_admin' => true]);
+        $this->actingAs($admin)
+            ->putJson('/api/admin/site-settings', [
+                'seo' => ['title' => 'DigitalPyme'],
+            ])
+            ->assertOk()
+            ->assertJsonPath('legal.privacy', $draft);
+
+        $this->getJson('/api/site-settings')
+            ->assertOk()
+            ->assertJsonPath('legal.privacy', null);
     }
 
     public function test_only_admin_can_update_seo_theme_brand_and_coverage_settings(): void
@@ -173,6 +186,17 @@ class SiteSettingsTest extends TestCase
     public function test_sitemap_and_robots_use_the_configured_frontend_url_and_slug(): void
     {
         config(['services.digitalpyme.frontend_url' => 'https://digitalpyme.pe']);
+        Servicio::create([
+            'nombre' => 'Optimización web',
+            'descripcion' => 'Servicio de prueba para el sitemap.',
+            'slug' => 'optimizacion-web',
+            'activo' => true,
+        ]);
+        Servicio::create([
+            'nombre' => 'Servicio pausado',
+            'slug' => 'servicio-pausado',
+            'activo' => false,
+        ]);
         $admin = User::factory()->create(['is_admin' => true]);
         $this->actingAs($admin)
             ->putJson('/api/admin/site-settings', [
@@ -183,10 +207,16 @@ class SiteSettingsTest extends TestCase
         $this->get('/sitemap.xml')
             ->assertOk()
             ->assertHeader('content-type', 'application/xml; charset=UTF-8')
-            ->assertSee('https://digitalpyme.pe/agencia-digital-lima', false);
+            ->assertSee('https://digitalpyme.pe/agencia-digital-lima', false)
+            ->assertSee('https://digitalpyme.pe/precios', false)
+            ->assertSee('https://digitalpyme.pe/catalogo-servicios', false)
+            ->assertSee('https://digitalpyme.pe/servicios/optimizacion-web', false)
+            ->assertDontSee('<loc>https://digitalpyme.pe/servicios</loc>', false)
+            ->assertDontSee('https://digitalpyme.pe/portafolio', false)
+            ->assertDontSee('https://digitalpyme.pe/servicios/servicio-pausado', false);
 
         $this->get('/robots.txt')
             ->assertOk()
-            ->assertSee('Sitemap: http://localhost/sitemap.xml');
+            ->assertSee('Sitemap: https://digitalpyme.pe/sitemap.xml');
     }
 }

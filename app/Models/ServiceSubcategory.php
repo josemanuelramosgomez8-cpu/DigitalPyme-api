@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class ServiceSubcategory extends Model
 {
@@ -23,5 +24,10 @@ class ServiceSubcategory extends Model
     public function services(): HasMany
     {
         return $this->hasMany(Servicio::class, 'subcategory_id');
+    }
+
+    public function inventory(): HasOne
+    {
+        return $this->hasOne(ServiceInventory::class, 'subcategory_id');
     }
 }

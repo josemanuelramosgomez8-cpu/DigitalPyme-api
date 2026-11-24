@@ -5,6 +5,7 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
 
         <title>{{ config('app.name', 'Laravel') }}</title>
+        <link rel="stylesheet" href="{{ asset('css/digitalpyme-services-overview.css') }}">
 
         <!-- Fonts -->
         <link rel="preconnect" href="https://fonts.bunny.net">
@@ -269,6 +270,9 @@
                 </div>
             </main>
         </div>
+
+        @include('components.sections.digital-services-overview')
+        @include('components.sections.information-management-cycle')
 
         @if (Route::has('login'))
             <div class="h-14.5 hidden lg:block"></div>

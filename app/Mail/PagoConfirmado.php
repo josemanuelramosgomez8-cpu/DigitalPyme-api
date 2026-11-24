@@ -3,6 +3,7 @@
 namespace App\Mail;
 
 use App\Models\ProjectPayment;
+use App\Support\PaymentConfirmationLinks;
 use App\Support\PaymentReceiptPdf;
 use Illuminate\Bus\Queueable;
 use Illuminate\Mail\Mailable;
@@ -24,13 +25,18 @@ class PagoConfirmado extends Mailable
 
     public function content(): Content
     {
+        $this->payment->loadMissing([
+            'project.client.user',
+            'project.cotizacion',
+            'milestone',
+        ]);
+
         return new Content(
             view: 'emails.pago-confirmado',
-            with: ['payment' => $this->payment->loadMissing([
-                'project.client.user',
-                'project.cotizacion',
-                'milestone',
-            ])],
+            with: [
+                'payment' => $this->payment,
+                'confirmationUrl' => app(PaymentConfirmationLinks::class)->forProject($this->payment)['show'],
+            ],
         );
     }
 

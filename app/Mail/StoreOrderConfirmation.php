@@ -3,6 +3,7 @@
 namespace App\Mail;
 
 use App\Models\StoreOrder;
+use App\Support\PaymentConfirmationLinks;
 use App\Support\StoreOrderReceiptPdf;
 use Illuminate\Bus\Queueable;
 use Illuminate\Mail\Mailable;
@@ -21,7 +22,9 @@ class StoreOrderConfirmation extends Mailable
     {
         $subject = $this->order->payment_status === 'pagado'
             ? "Comprobante de pago DigitalPyme #{$this->order->id}"
-            : "Confirmación de pedido DigitalPyme #{$this->order->id}";
+            : ($this->order->payment_method === 'direct_coordination'
+                ? "Solicitud recibida DigitalPyme #{$this->order->id}"
+                : "Confirmación de pedido DigitalPyme #{$this->order->id}");
 
         return new Envelope(subject: $subject);
     }
@@ -30,7 +33,12 @@ class StoreOrderConfirmation extends Mailable
     {
         return new Content(
             view: 'emails.pedido-confirmado',
-            with: ['order' => $this->order->loadMissing('items', 'client.user')],
+            with: [
+                'order' => $this->order->loadMissing('items', 'client.user'),
+                'coordinationEmail' => config('services.digitalpyme.solicitudes_email'),
+                'coordinationWhatsapp' => \App\Models\SiteSetting::publicSettings()['contact']['whatsapp_phone'],
+                'confirmationUrl' => app(PaymentConfirmationLinks::class)->forOrder($this->order)['show'],
+            ],
         );
     }
 

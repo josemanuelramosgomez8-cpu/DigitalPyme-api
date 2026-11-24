@@ -87,6 +87,7 @@ class StoreLogisticsTest extends TestCase
     public function test_shipping_options_and_free_shipping_threshold_are_configurable_by_admin(): void
     {
         $methods = [
+            ['key' => 'recojo', 'nombre' => 'Recojo', 'cost' => 0, 'delivery_days' => 0, 'enabled' => true],
             ['key' => 'estandar', 'nombre' => 'Estándar', 'cost' => 9, 'delivery_days' => 4, 'enabled' => true],
             ['key' => 'express', 'nombre' => 'Express', 'cost' => 18, 'delivery_days' => 1, 'enabled' => true],
             ['key' => 'same_day', 'nombre' => 'Same-day', 'cost' => 25, 'delivery_days' => 0, 'enabled' => false],
@@ -106,12 +107,13 @@ class StoreLogisticsTest extends TestCase
                 ],
             ])->assertOk()
             ->assertJsonPath('coverage.free_shipping_threshold', 250)
-            ->assertJsonPath('coverage.shipping_methods.2.enabled', false);
+            ->assertJsonPath('coverage.shipping_methods.3.enabled', false);
 
         $this->getJson('/api/store/shipping-options')
             ->assertOk()
             ->assertJsonPath('free_shipping_threshold', 250)
-            ->assertJsonPath('methods.0.cost', 9);
+            ->assertJsonPath('methods.0.cost', 0)
+            ->assertJsonPath('methods.1.cost', 9);
     }
 
     public function test_checkout_uses_zone_fee_as_standard_base_and_adds_only_method_surcharge(): void
@@ -123,6 +125,7 @@ class StoreLogisticsTest extends TestCase
                     ['location' => 'Lima', 'fee' => 8, 'delivery_days' => 3],
                 ],
                 'shipping_methods' => [
+                    ['key' => 'recojo', 'nombre' => 'Recojo', 'cost' => 0, 'delivery_days' => 0, 'enabled' => true],
                     ['key' => 'estandar', 'nombre' => 'Estándar', 'cost' => 12, 'delivery_days' => 3, 'enabled' => true],
                     ['key' => 'express', 'nombre' => 'Express', 'cost' => 20, 'delivery_days' => 1, 'enabled' => true],
                     ['key' => 'same_day', 'nombre' => 'Same-day', 'cost' => 28, 'delivery_days' => 0, 'enabled' => true],
@@ -150,6 +153,134 @@ class StoreLogisticsTest extends TestCase
             ->assertJsonPath('costo_envio', '16.00')
             ->assertJsonPath('igv_amount', '11.88')
             ->assertJsonPath('total', '77.88');
+    }
+
+    public function test_shipping_quote_returns_itemized_totals_in_selected_currency_without_reserving_stock(): void
+    {
+        config(['services.store.usd_exchange_rate' => '3.70']);
+        $admin = User::factory()->create(['is_admin' => true]);
+        $this->actingAs($admin)->putJson('/api/admin/site-settings', [
+            'coverage' => [
+                'shipping_zones' => [
+                    ['location' => 'Lima', 'fee' => 8, 'delivery_days' => 3],
+                ],
+            ],
+        ])->assertOk();
+        $product = StoreProduct::create([
+            'sku' => 'SHIPPING-QUOTE',
+            'nombre' => 'Producto para cotizar envío',
+            'precio' => 50,
+            'stock' => 2,
+        ]);
+        $clientUser = User::factory()->create(['is_client' => true]);
+        Client::create(['user_id' => $clientUser->id, 'nombre' => $clientUser->name]);
+        $this->actingAs($clientUser)->putJson('/api/client/store/cart', [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            'communications_consent' => false,
+            'currency' => 'USD',
+        ])->assertOk();
+
+        $this->actingAs($clientUser)->postJson('/api/client/store/shipping-quote', [
+            'metodo_envio' => 'express',
+            'ubicacion_entrega' => 'lima',
+        ])->assertOk()
+            ->assertJsonPath('subtotal', '50.00')
+            ->assertJsonPath('costo_envio', '16.00')
+            ->assertJsonPath('igv_amount', '11.88')
+            ->assertJsonPath('total', '77.88')
+            ->assertJsonPath('payment_currency', 'PEN')
+            ->assertJsonPath('display_currency', 'USD')
+            ->assertJsonPath('display_amounts.subtotal', '13.51')
+            ->assertJsonPath('display_amounts.shipping', '4.32')
+            ->assertJsonPath('display_amounts.total', '21.05')
+            ->assertJsonPath('shipping.zone_configured', true)
+            ->assertJsonPath('shipping.delivery_days', 3)
+            ->assertJsonPath('stock_reserved', false);
+
+        $this->assertDatabaseCount('store_orders', 0);
+        $this->assertDatabaseHas('store_products', ['id' => $product->id, 'stock' => 2]);
+    }
+
+    public function test_shipping_quote_uses_configured_method_fee_when_no_zone_matches(): void
+    {
+        $admin = User::factory()->create(['is_admin' => true]);
+        $this->actingAs($admin)->putJson('/api/admin/site-settings', [
+            'coverage' => [
+                'shipping_zones' => [
+                    ['location' => 'Lima', 'fee' => 8, 'delivery_days' => 3],
+                ],
+            ],
+        ])->assertOk();
+        $product = StoreProduct::create([
+            'sku' => 'SHIPPING-FALLBACK',
+            'nombre' => 'Producto con tarifa general',
+            'precio' => 50,
+            'stock' => 1,
+        ]);
+        $clientUser = User::factory()->create(['is_client' => true]);
+        Client::create(['user_id' => $clientUser->id, 'nombre' => $clientUser->name]);
+        $this->actingAs($clientUser)->putJson('/api/client/store/cart', [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            'communications_consent' => false,
+        ])->assertOk();
+
+        $this->actingAs($clientUser)->postJson('/api/client/store/shipping-quote', [
+            'metodo_envio' => 'estandar',
+            'ubicacion_entrega' => 'Arequipa',
+        ])->assertOk()
+            ->assertJsonPath('costo_envio', '12.00')
+            ->assertJsonPath('shipping.zone_configured', false)
+            ->assertJsonPath('shipping.location', 'Arequipa');
+    }
+
+    public function test_tumbes_zones_return_verified_demo_coverage(): void
+    {
+        $admin = User::factory()->create(['is_admin' => true]);
+        $this->actingAs($admin)->putJson('/api/admin/site-settings', [
+            'coverage' => [
+                'shipping_zones' => [
+                    ['location' => 'Tumbes', 'fee' => 8, 'delivery_days' => 2],
+                    ['location' => 'Corrales', 'fee' => 10, 'delivery_days' => 2],
+                    ['location' => 'Zorritos', 'fee' => 15, 'delivery_days' => 3],
+                ],
+            ],
+        ])->assertOk();
+
+        $this->getJson('/api/cobertura?servicio=Tiendas%20en%20linea&ubicacion=Tumbes')
+            ->assertOk()
+            ->assertJsonPath('envio.ubicacion', 'Tumbes')
+            ->assertJsonPath('envio.cubierto', true)
+            ->assertJsonPath('envio.costo', 8)
+            ->assertJsonPath('envio.plazo_dias', 2);
+
+        $this->getJson('/api/cobertura?servicio=Tiendas%20en%20linea&ubicacion=Zarumilla')
+            ->assertOk()
+            ->assertJsonPath('envio.cubierto', false);
+    }
+
+    public function test_pickup_shipping_quote_has_no_cost_or_delivery_wait(): void
+    {
+        $product = StoreProduct::create([
+            'sku' => 'SHIPPING-PICKUP',
+            'nombre' => 'Producto para recojo',
+            'precio' => 50,
+            'stock' => 1,
+        ]);
+        $clientUser = User::factory()->create(['is_client' => true]);
+        Client::create(['user_id' => $clientUser->id, 'nombre' => $clientUser->name]);
+        $this->actingAs($clientUser)->putJson('/api/client/store/cart', [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            'communications_consent' => false,
+        ])->assertOk();
+
+        $this->actingAs($clientUser)->postJson('/api/client/store/shipping-quote', [
+            'metodo_envio' => 'recojo',
+            'ubicacion_entrega' => 'Lima',
+        ])->assertOk()
+            ->assertJsonPath('costo_envio', '0.00')
+            ->assertJsonPath('shipping.method', 'recojo')
+            ->assertJsonPath('shipping.delivery_days', 0)
+            ->assertJsonPath('stock_reserved', false);
     }
 
     public function test_store_only_offers_configured_manual_payment_methods(): void
@@ -187,6 +318,197 @@ class StoreLogisticsTest extends TestCase
             ->assertJsonValidationErrors(['payment_method']);
 
         $this->assertDatabaseCount('store_orders', 0);
+    }
+
+    public function test_store_currency_preference_displays_usd_but_persists_and_charges_pen(): void
+    {
+        config(['services.store.usd_exchange_rate' => '3.70']);
+
+        $clientUser = User::factory()->create(['is_client' => true]);
+        Client::create(['user_id' => $clientUser->id, 'nombre' => $clientUser->name]);
+        $product = StoreProduct::create([
+            'sku' => 'USD-CURRENCY',
+            'nombre' => 'Producto con conversión',
+            'precio' => 100,
+            'stock' => 2,
+        ]);
+
+        $this->actingAs($clientUser)->putJson('/api/client/store/cart', [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            'communications_consent' => false,
+            'currency' => 'USD',
+        ])->assertOk()
+            ->assertJsonPath('currency', 'USD');
+
+        $this->getJson('/api/store/payment-options')
+            ->assertOk()
+            ->assertJsonPath('currencies.1.code', 'USD')
+            ->assertJsonPath('currencies.1.enabled', true)
+            ->assertJsonPath('currencies.1.exchange_rate', '3.700000');
+        $this->getJson('/api/store/products')
+            ->assertOk()
+            ->assertJsonPath('0.precio', '100.00')
+            ->assertJsonPath('0.precio_usd', '27.03');
+
+        $orderId = $this->postJson('/api/client/store/orders', [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
+            'metodo_envio' => 'estandar',
+            'payment_method' => 'bank_transfer',
+            'ubicacion_entrega' => 'Lima',
+            'direccion_entrega' => 'Av. Demo 123',
+        ])->assertCreated()
+            ->assertJsonPath('display_currency', 'USD')
+            ->assertJsonPath('total', '132.16')
+            ->assertJsonPath('display_amounts.currency', 'USD')
+            ->assertJsonPath('display_amounts.total', '35.72')
+            ->json('id');
+
+        $this->assertDatabaseHas('store_orders', [
+            'id' => $orderId,
+            'total' => '132.16',
+            'display_currency' => 'USD',
+            'display_exchange_rate' => '3.700000',
+        ]);
+        $this->assertDatabaseHas('store_carts', [
+            'user_id' => $clientUser->id,
+            'currency' => 'USD',
+        ]);
+    }
+
+    public function test_store_currency_selection_requires_a_configured_usd_exchange_rate(): void
+    {
+        $clientUser = User::factory()->create(['is_client' => true]);
+        Client::create(['user_id' => $clientUser->id, 'nombre' => $clientUser->name]);
+        $product = StoreProduct::create([
+            'sku' => 'USD-RATE-REQUIRED',
+            'nombre' => 'Producto para validar tipo de cambio',
+            'precio' => 10,
+            'stock' => 1,
+        ]);
+
+        $this->actingAs($clientUser)->putJson('/api/client/store/cart', [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            'communications_consent' => false,
+            'currency' => 'USD',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['currency']);
+
+        $this->getJson('/api/store/payment-options')
+            ->assertOk()
+            ->assertJsonPath('currencies.1.enabled', false);
+    }
+
+    public function test_direct_coordination_checkout_works_without_payment_providers_and_keeps_selected_currency(): void
+    {
+        Storage::fake('uploads');
+        Mail::fake();
+        config([
+            'services.bank_transfer.account' => null,
+            'services.bank_transfer.cci' => null,
+            'services.yape_plin.enabled' => false,
+            'services.mercadopago.access_token' => null,
+            'services.store.usd_exchange_rate' => '3.70',
+            'services.digitalpyme.solicitudes_email' => 'ventas@example.test',
+        ]);
+        $admin = User::factory()->create(['is_admin' => true]);
+        $this->actingAs($admin)->putJson('/api/admin/site-settings', [
+            'contact' => ['whatsapp_phone' => '+51912345678'],
+        ])->assertOk();
+
+        $clientUser = User::factory()->create(['is_client' => true]);
+        Client::create(['user_id' => $clientUser->id, 'nombre' => $clientUser->name]);
+        $product = StoreProduct::create([
+            'sku' => 'DIRECT-COORDINATION',
+            'nombre' => 'Producto para coordinar',
+            'precio' => 50,
+            'stock' => 2,
+        ]);
+
+        $this->getJson('/api/store/payment-options')
+            ->assertOk()
+            ->assertJsonPath('card_enabled', false)
+            ->assertJsonPath('bank_transfer.enabled', false)
+            ->assertJsonPath('yape_plin.enabled', false)
+            ->assertJsonPath('direct_coordination.enabled', true);
+
+        $orderId = $this->actingAs($clientUser)->postJson('/api/client/store/orders', [
+            'items' => [['product_id' => $product->id, 'cantidad' => 1]],
+            ...$this->checkoutIdentity(),
+            'currency' => 'USD',
+            'metodo_envio' => 'estandar',
+            'payment_method' => 'direct_coordination',
+            'ubicacion_entrega' => 'Lima',
+            'direccion_entrega' => 'Av. Demo 123',
+        ])->assertCreated()
+            ->assertJsonPath('payment_method', 'direct_coordination')
+            ->assertJsonPath('payment_status', 'pendiente')
+            ->assertJsonPath('display_currency', 'USD')
+            ->assertJsonPath('display_amounts.currency', 'USD')
+            ->assertJsonPath('coordinacion.email', 'ventas@example.test')
+            ->assertJsonPath('coordinacion.whatsapp_phone', '+51912345678')
+            ->assertJsonPath('coordinacion.total_pen', '73.16')
+            ->json('id');
+
+        Mail::assertSent(StoreOrderConfirmation::class, fn (StoreOrderConfirmation $mail) => $mail->order->id === $orderId);
+
+        $this->actingAs($clientUser)->post("/api/client/store/orders/{$orderId}/receipt", [
+            'file' => UploadedFile::fake()->create('comprobante.pdf', 100, 'application/pdf'),
+        ])->assertCreated()
+            ->assertJsonPath('payment_status', 'comprobante_enviado');
+
+        $this->actingAs($admin)->patchJson("/api/admin/store/orders/{$orderId}/payment", [
+            'payment_status' => 'pagado',
+        ])->assertOk();
+        $this->assertDatabaseHas('store_orders', [
+            'id' => $orderId,
+            'payment_method' => 'direct_coordination',
+            'display_currency' => 'USD',
+            'payment_status' => 'pagado',
+        ]);
+    }
+
+    public function test_admins_receive_inventory_alerts_only_when_stock_enters_a_new_alert_state(): void
+    {
+        $admin = User::factory()->create(['is_admin' => true]);
+        $productId = $this->actingAs($admin)->postJson('/api/admin/store/products', [
+            'sku' => 'STOCK-ALERT',
+            'nombre' => 'Producto con alerta',
+            'precio' => 10,
+            'stock' => 10,
+            'punto_reorden' => 2,
+        ])->assertCreated()->json('id');
+
+        $this->postJson("/api/admin/store/products/{$productId}/movements", [
+            'tipo' => 'salida',
+            'cantidad' => 8,
+            'motivo' => 'Ajuste de prueba',
+        ])->assertOk();
+        $this->postJson("/api/admin/store/products/{$productId}/movements", [
+            'tipo' => 'salida',
+            'cantidad' => 1,
+            'motivo' => 'Ajuste de prueba',
+        ])->assertOk();
+        $this->assertDatabaseCount('notifications', 1);
+
+        $this->postJson("/api/admin/store/products/{$productId}/movements", [
+            'tipo' => 'salida',
+            'cantidad' => 1,
+            'motivo' => 'Ajuste de prueba',
+        ])->assertOk();
+        $this->assertDatabaseCount('notifications', 2);
+
+        $notification = $admin->notifications()
+            ->get()
+            ->first(fn ($item) => $item->data['details']['status'] === 'out_of_stock');
+        $this->assertNotNull($notification);
+        $this->getJson('/api/admin/notifications')
+            ->assertOk()
+            ->assertJsonPath('0.data.event_type', 'store_inventory_alert')
+            ->assertJsonFragment(['status' => 'out_of_stock']);
+        $this->patchJson("/api/admin/notifications/{$notification->id}/read")
+            ->assertOk();
+        $this->assertNotNull($notification->fresh()->read_at);
     }
 
     public function test_only_administrators_can_manage_store_coupons(): void

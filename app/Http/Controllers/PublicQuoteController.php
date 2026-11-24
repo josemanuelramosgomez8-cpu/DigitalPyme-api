@@ -12,6 +12,15 @@ use Illuminate\Validation\ValidationException;
 
 class PublicQuoteController extends Controller
 {
+    private const VISUAL_TEMPLATE_LABELS = [
+        'sin-preferencia' => 'Sin preferencia',
+        'moderna' => 'Moderna (sans serif y títulos expresivos)',
+        'minimalista' => 'Minimalista (sans serif limpia)',
+        'editorial' => 'Editorial (serif y sans serif)',
+        'corporativa' => 'Corporativa (sans serif profesional)',
+        'personalizada' => 'Personalizada (tipografía por definir)',
+    ];
+
     public function store(Request $request, SolicitudNotifier $notifier)
     {
         if ($request->filled('website')) {
@@ -35,7 +44,18 @@ class PublicQuoteController extends Controller
             'metodo_pago_preferido' => ['sometimes', 'required', Rule::in(['undecided', 'card', 'bank_transfer', 'yape', 'plin', 'yape_plin', 'paypal'])],
             'website' => 'sometimes|nullable|string|max:255',
             'mensaje' => 'nullable|string|max:4000',
+            'plantilla_visual' => ['sometimes', 'nullable', Rule::in(array_keys(self::VISUAL_TEMPLATE_LABELS))],
+            'color_primario' => ['sometimes', 'nullable', 'regex:/^#[0-9a-fA-F]{6}$/'],
+            'color_acento' => ['sometimes', 'nullable', 'regex:/^#[0-9a-fA-F]{6}$/'],
         ]);
+
+        $hasCustomColors = filled($datos['color_primario'] ?? null)
+            || filled($datos['color_acento'] ?? null);
+        if (($datos['plantilla_visual'] ?? null) !== 'personalizada' && $hasCustomColors) {
+            throw ValidationException::withMessages([
+                'plantilla_visual' => 'Selecciona la plantilla personalizada para enviar colores de marca.',
+            ]);
+        }
 
         $paymentPreference = $datos['metodo_pago_preferido'] ?? 'undecided';
         $paymentPreferenceLabel = match ($paymentPreference) {
@@ -96,9 +116,26 @@ class PublicQuoteController extends Controller
         if (filled($datos['mensaje'] ?? null)) {
             $descripcion .= "\n\nDetalles del proyecto:\n".$datos['mensaje'];
         }
+        $visualSummary = null;
+        if (filled($datos['plantilla_visual'] ?? null)) {
+            $visualDetails = [
+                'Plantilla visual seleccionada: '.self::VISUAL_TEMPLATE_LABELS[$datos['plantilla_visual']],
+            ];
+            if ($datos['plantilla_visual'] === 'personalizada') {
+                if (filled($datos['color_primario'] ?? null)) {
+                    $visualDetails[] = 'Color principal de referencia: '.$datos['color_primario'];
+                }
+                if (filled($datos['color_acento'] ?? null)) {
+                    $visualDetails[] = 'Color de acento de referencia: '.$datos['color_acento'];
+                }
+            }
+            $visualSummary = "Preferencias visuales:\n".implode("\n", $visualDetails);
+            $descripcion .= "\n\n".$visualSummary;
+        }
         $mensajeLead = trim(implode("\n\n", array_filter([
             $registroComercial,
             $datos['mensaje'] ?? null,
+            $visualSummary,
         ])));
 
         [$lead, $cotizacion] = DB::transaction(function () use ($datos, $descripcion, $mensajeLead, $monto, $inversionEstimada) {
