@@ -6,18 +6,33 @@ use App\Events\ProjectStatusChanged;
 use App\Models\Project;
 use App\Models\ProjectMilestone;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class ProjectController extends Controller
 {
     public function index()
     {
-        return response()->json(
-            Project::query()
-                ->with(['client:id,nombre,empresa', 'cotizacion:id,servicio,monto,estado'])
-                ->latest()
-                ->get()
-        );
+        $projects = Project::query()
+            ->with([
+                'client:id,nombre,empresa,telefono',
+                'cotizacion:id,servicio,monto,estado',
+                'brief:id,project_id,answers,submitted_at',
+                'serviceRequests' => fn ($query) => $query->latest(),
+                'payments' => fn ($query) => $query
+                    ->select(['id', 'project_id', 'currency', 'status', 'amount'])
+                    ->orderByDesc('id'),
+            ])
+            ->latest()
+            ->get();
+
+        $projects->each(function (Project $project) {
+            $project->makeVisible(['recepcion_checklist', 'notas_preparacion']);
+            $project->serviceRequests->each->makeVisible('internal_notes');
+        });
+
+        return response()->json($projects);
     }
 
     public function store(Request $request)
@@ -26,7 +41,7 @@ class ProjectController extends Controller
             'client_id' => ['required', 'integer', Rule::exists('clients', 'id')],
             'nombre' => 'required|string|max:255',
             'descripcion' => 'nullable|string|max:5000',
-            'estado' => ['sometimes', Rule::in(Project::ESTADOS)],
+            'estado' => ['sometimes', Rule::in(['planificacion'])],
             'progreso' => 'sometimes|integer|between:0,100',
             'fecha_inicio' => 'nullable|date',
             'fecha_entrega' => 'nullable|date|after_or_equal:fecha_inicio',
@@ -35,7 +50,8 @@ class ProjectController extends Controller
         $project = Project::create($datos)->refresh();
 
         return response()->json(
-            $project->load(['client:id,nombre,empresa', 'cotizacion:id,servicio,monto,estado']),
+            $project->load(['client:id,nombre,empresa,telefono', 'cotizacion:id,servicio,monto,estado'])
+                ->makeVisible(['recepcion_checklist', 'notas_preparacion']),
             201
         );
     }
@@ -49,15 +65,141 @@ class ProjectController extends Controller
             'progreso' => 'sometimes|required|integer|between:0,100',
             'fecha_inicio' => 'nullable|date',
             'fecha_entrega' => 'nullable|date|after_or_equal:fecha_inicio',
+            'recepcion_checklist' => ['sometimes', 'array:'.implode(',', Project::RECEPCION_CHECKLIST_KEYS)],
+            'recepcion_checklist.alcance_confirmado' => ['sometimes', 'boolean'],
+            'recepcion_checklist.brief_revisado' => ['sometimes', 'boolean'],
+            'recepcion_checklist.insumos_recibidos' => ['sometimes', 'boolean'],
+            'recepcion_checklist.accesos_coordinados' => ['sometimes', 'boolean'],
+            'notas_preparacion' => ['nullable', 'string', 'max:5000'],
+            'modalidad_entrega' => ['nullable', Rule::in(['infra_cliente', 'gestionada'])],
+            'url_entregable' => ['nullable', 'url', 'starts_with:https://', 'max:2048'],
+            'resumen_entrega' => ['nullable', 'string', 'max:3000'],
         ]);
 
-        $previousStatus = $project->estado;
-        $project->update($datos);
+        [$project, $previousStatus] = DB::transaction(function () use ($project, $datos) {
+            $project = Project::query()->lockForUpdate()->findOrFail($project->id);
+            $previousStatus = $project->estado;
+            $nextStatus = $datos['estado'] ?? $project->estado;
+
+            if (array_key_exists('recepcion_checklist', $datos)) {
+                $datos['recepcion_checklist'] = array_replace(
+                    array_fill_keys(Project::RECEPCION_CHECKLIST_KEYS, false),
+                    $project->recepcion_checklist ?? [],
+                    $datos['recepcion_checklist'],
+                );
+            }
+
+            $checklist = array_replace(
+                array_fill_keys(Project::RECEPCION_CHECKLIST_KEYS, false),
+                $project->recepcion_checklist ?? [],
+                $datos['recepcion_checklist'] ?? [],
+            );
+
+            if (
+                $nextStatus === 'en_progreso'
+                && $previousStatus !== 'en_progreso'
+                && blank($project->recepcion_confirmada_at)
+            ) {
+                $missingRequirements = [];
+                foreach (Project::RECEPCION_CHECKLIST_KEYS as $key) {
+                    if (! ($checklist[$key] ?? false)) {
+                        $missingRequirements["recepcion_checklist.{$key}"] = [
+                            'Completa el checklist de recepción antes de iniciar la preparación.',
+                        ];
+                    }
+                }
+                if ($missingRequirements !== []) {
+                    throw ValidationException::withMessages($missingRequirements);
+                }
+
+                if (! $project->payments()
+                    ->where('status', 'pagado')
+                    ->whereNotNull('paid_at')
+                    ->exists()) {
+                    throw ValidationException::withMessages([
+                        'payment' => 'Confirma al menos un pago del proyecto antes de iniciar la preparación.',
+                    ]);
+                }
+
+                $datos['recepcion_checklist'] = $checklist;
+                $datos['recepcion_confirmada_at'] = now();
+            }
+
+            if ($nextStatus === 'revision' && $previousStatus !== 'revision') {
+                if ($previousStatus !== 'en_progreso') {
+                    throw ValidationException::withMessages([
+                        'estado' => 'Solo puedes enviar a revisión un servicio que esté en preparación.',
+                    ]);
+                }
+
+                $deliveryMode = array_key_exists('modalidad_entrega', $datos)
+                    ? $datos['modalidad_entrega']
+                    : $project->modalidad_entrega;
+                $deliveryUrl = array_key_exists('url_entregable', $datos)
+                    ? $datos['url_entregable']
+                    : $project->url_entregable;
+                $deliverySummary = array_key_exists('resumen_entrega', $datos)
+                    ? $datos['resumen_entrega']
+                    : $project->resumen_entrega;
+                $hasProjectFile = $project->documents()->where('tipo', 'documento')->exists();
+
+                $deliveryErrors = [];
+                if (! $deliveryMode) {
+                    $deliveryErrors['modalidad_entrega'] = [
+                        'Selecciona cómo se implementará o entregará el servicio.',
+                    ];
+                }
+                if (blank($deliverySummary)) {
+                    $deliveryErrors['resumen_entrega'] = [
+                        'Incluye un resumen de lo que recibirá el cliente.',
+                    ];
+                }
+                if (blank($deliveryUrl) && ! $hasProjectFile) {
+                    $deliveryErrors['url_entregable'] = [
+                        'Agrega un enlace seguro o sube un entregable al proyecto antes de enviarlo a revisión.',
+                    ];
+                }
+                if ($deliveryErrors !== []) {
+                    throw ValidationException::withMessages($deliveryErrors);
+                }
+
+                $datos['entrega_enviada_at'] = now();
+                $datos['progreso'] = max($datos['progreso'] ?? $project->progreso, 90);
+            }
+
+            if ($nextStatus === 'completado') {
+                if ($previousStatus !== 'revision' && $previousStatus !== 'completado') {
+                    throw ValidationException::withMessages([
+                        'estado' => 'El servicio debe enviarse a revisión antes de marcarlo como completado.',
+                    ]);
+                }
+                $datos['progreso'] = 100;
+                $datos['entregado_at'] ??= $project->entregado_at ?? now();
+            }
+
+            $project->update($datos);
+
+            return [$project->refresh(), $previousStatus];
+        });
+
         if ($project->estado !== $previousStatus) {
-            event(new ProjectStatusChanged($project->refresh(), $previousStatus, $project->estado));
+            event(new ProjectStatusChanged($project, $previousStatus, $project->estado));
         }
 
-        return response()->json($project->load(['client:id,nombre,empresa', 'cotizacion:id,servicio,monto,estado']));
+        $project->load([
+            'client:id,nombre,empresa,telefono',
+            'cotizacion:id,servicio,monto,estado',
+            'brief:id,project_id,answers,submitted_at',
+            'serviceRequests' => fn ($query) => $query->latest(),
+            'payments' => fn ($query) => $query
+                ->select(['id', 'project_id', 'currency', 'status', 'amount'])
+                ->orderByDesc('id'),
+        ]);
+        $project->serviceRequests->each->makeVisible('internal_notes');
+
+        return response()->json(
+            $project->makeVisible(['recepcion_checklist', 'notas_preparacion'])
+        );
     }
 
     public function clientIndex(Request $request)
@@ -66,7 +208,7 @@ class ProjectController extends Controller
 
         return response()->json(
             $client->projects()
-                ->with(['cotizacion:id,servicio,descripcion,monto,estado', 'milestones'])
+                ->with(['cotizacion:id,servicio,descripcion,monto,estado', 'milestones', 'serviceRequests'])
                 ->latest()
                 ->get()
         );
@@ -81,6 +223,7 @@ class ProjectController extends Controller
             $project->load([
                 'cotizacion:id,servicio,descripcion,monto,estado',
                 'milestones',
+                'serviceRequests' => fn ($query) => $query->latest(),
                 'documents:id,project_id,payment_id,original_name,tipo,mime_type,size,created_at',
                 'payments:id,reference,project_id,milestone_id,method,provider,provider_reference,amount,currency,status,paid_at,created_at',
             ])

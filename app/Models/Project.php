@@ -11,6 +11,15 @@ class Project extends Model
 {
     public const ESTADOS = ['planificacion', 'en_progreso', 'revision', 'completado', 'pausado'];
 
+    public const RECEPCION_CHECKLIST_KEYS = [
+        'alcance_confirmado',
+        'brief_revisado',
+        'insumos_recibidos',
+        'accesos_coordinados',
+    ];
+
+    protected $hidden = ['recepcion_checklist', 'notas_preparacion'];
+
     protected $fillable = [
         'client_id',
         'cotizacion_id',
@@ -21,6 +30,14 @@ class Project extends Model
         'fecha_inicio',
         'fecha_entrega',
         'post_sale_scheduled_at',
+        'recepcion_checklist',
+        'recepcion_confirmada_at',
+        'notas_preparacion',
+        'modalidad_entrega',
+        'url_entregable',
+        'resumen_entrega',
+        'entrega_enviada_at',
+        'entregado_at',
     ];
 
     protected function casts(): array
@@ -30,6 +47,10 @@ class Project extends Model
             'fecha_inicio' => 'date:Y-m-d',
             'fecha_entrega' => 'date:Y-m-d',
             'post_sale_scheduled_at' => 'datetime',
+            'recepcion_checklist' => 'array',
+            'recepcion_confirmada_at' => 'datetime',
+            'entrega_enviada_at' => 'datetime',
+            'entregado_at' => 'datetime',
         ];
     }
 
@@ -61,6 +82,11 @@ class Project extends Model
     public function payments(): HasMany
     {
         return $this->hasMany(ProjectPayment::class);
+    }
+
+    public function serviceRequests(): HasMany
+    {
+        return $this->hasMany(ProjectServiceRequest::class);
     }
 
     public function brief(): HasOne

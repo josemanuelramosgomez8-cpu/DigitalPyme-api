@@ -15,6 +15,7 @@ use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\ProjectDocumentController;
 use App\Http\Controllers\ProjectMessageController;
 use App\Http\Controllers\ProjectPaymentController;
+use App\Http\Controllers\ProjectServiceRequestController;
 use App\Http\Controllers\PublicQuoteController;
 use App\Http\Controllers\PublicQuoteVerificationController;
 use App\Http\Controllers\ServiceCategoryController;
@@ -145,7 +146,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::get('/admin/projects', [ProjectController::class, 'index']);
         Route::post('/admin/projects', [ProjectController::class, 'store']);
-        Route::patch('/admin/projects/{project}', [ProjectController::class, 'update']);
+        Route::patch('/admin/projects/{project}', [ProjectController::class, 'update'])
+            ->name('admin.projects.update');
+        Route::patch('/admin/project-service-requests/{serviceRequest}', [ProjectServiceRequestController::class, 'adminUpdate'])
+            ->name('admin.project-service-requests.update');
         Route::get('/admin/projects/{project}/milestones', [ProjectController::class, 'adminMilestones']);
         Route::post('/admin/projects/{project}/milestones', [ProjectController::class, 'adminStoreMilestone']);
         Route::patch('/admin/projects/{project}/milestones/{milestone}', [ProjectController::class, 'adminUpdateMilestone']);
@@ -177,8 +181,12 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/store/orders/{storeOrder}/returns', [StoreLogisticsController::class, 'clientReturn']);
         Route::get('/projects', [ProjectController::class, 'clientIndex']);
         Route::get('/projects/{project}', [ProjectController::class, 'clientShow']);
+        Route::post('/projects/{project}/service-requests', [ProjectServiceRequestController::class, 'clientStore'])
+            ->middleware('throttle:5,1')
+            ->name('client.projects.service-requests.store');
         Route::post('/projects/{project}/milestones/{milestone}/approve', [ClientMilestoneController::class, 'approve']);
-        Route::post('/projects/{project}/delivery-response', [ClientProjectDeliveryController::class, 'respond']);
+        Route::post('/projects/{project}/delivery-response', [ClientProjectDeliveryController::class, 'respond'])
+            ->name('client.projects.delivery.respond');
         Route::get('/projects/{project}/payments', [ProjectPaymentController::class, 'clientIndex']);
         Route::post('/projects/{project}/payments/transfers', [ProjectPaymentController::class, 'startTransfer']);
         Route::post('/projects/{project}/payments/card', [ProjectPaymentController::class, 'startCardPayment']);

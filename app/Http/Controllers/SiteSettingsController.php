@@ -59,6 +59,7 @@ class SiteSettingsController extends Controller
             'legal.warranty' => ['sometimes', 'required', 'string', 'max:5000'],
             'legal.terms' => ['sometimes', 'required', 'string', 'max:5000'],
             'legal.returns' => ['sometimes', 'required', 'string', 'max:5000'],
+            'legal.service_changes' => ['sometimes', 'required', 'string', 'max:5000'],
             'legal.payments' => ['sometimes', 'required', 'string', 'max:5000'],
             'legal.revisions' => ['sometimes', 'required', 'string', 'max:5000'],
             'legal.intellectual_property' => ['sometimes', 'required', 'string', 'max:5000'],

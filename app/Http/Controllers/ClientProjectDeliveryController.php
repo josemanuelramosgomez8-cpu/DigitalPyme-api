@@ -42,6 +42,7 @@ class ClientProjectDeliveryController extends Controller
                 $project->update([
                     'estado' => 'completado',
                     'progreso' => 100,
+                    'entregado_at' => now(),
                 ]);
             }
 

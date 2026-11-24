@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\User;
 use App\Models\Servicio;
+use App\Models\SiteSetting;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -18,6 +19,7 @@ class SiteSettingsTest extends TestCase
             ->assertJsonPath('seo.title', 'DigitalPyme | Agencia digital para pymes en Lima')
             ->assertJsonPath('legal.privacy_published', false)
             ->assertJsonPath('legal.privacy', null)
+            ->assertJsonPath('legal.service_changes', SiteSetting::defaults()['legal']['service_changes'])
             ->assertJsonPath('theme.dark', '#102c2c')
             ->assertJsonPath('theme.lime', '#c9f45b')
             ->assertJsonPath('theme.cream', '#f6f4ed')
@@ -75,6 +77,7 @@ class SiteSettingsTest extends TestCase
             'legal' => [
                 'privacy' => 'Política de privacidad revisada.',
                 'privacy_published' => true,
+                'service_changes' => 'Política específica para solicitudes de servicios.',
             ],
             'theme' => [
                 'dark' => '#123456',
@@ -104,6 +107,7 @@ class SiteSettingsTest extends TestCase
             ->assertJsonPath('contact.whatsapp_phone', '+51987654321')
             ->assertJsonPath('legal.privacy', 'Política de privacidad revisada.')
             ->assertJsonPath('legal.privacy_published', true)
+            ->assertJsonPath('legal.service_changes', 'Política específica para solicitudes de servicios.')
             ->assertJsonPath('theme.font_display', 'Playfair Display')
             ->assertJsonPath('coverage.shipping_zones.0.fee', 12.5);
 
@@ -113,6 +117,7 @@ class SiteSettingsTest extends TestCase
             ->assertJsonPath('contact.whatsapp_phone', '+51987654321')
             ->assertJsonPath('legal.privacy', 'Política de privacidad revisada.')
             ->assertJsonPath('legal.privacy_published', true)
+            ->assertJsonPath('legal.service_changes', 'Política específica para solicitudes de servicios.')
             ->assertJsonPath('coverage.digital_mode', 'virtual');
     }
 

@@ -5,8 +5,10 @@ namespace Tests\Feature;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\Project;
+use App\Models\ProjectPayment;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class ClientProjectTest extends TestCase
@@ -196,12 +198,30 @@ class ClientProjectTest extends TestCase
             ->assertJsonPath('estado', 'planificacion')
             ->assertJsonPath('progreso', 0);
 
+        ProjectPayment::create([
+            'reference' => (string) Str::uuid(),
+            'project_id' => $project->json('id'),
+            'method' => 'bank_transfer',
+            'amount' => 100,
+            'currency' => 'PEN',
+            'status' => 'pagado',
+            'paid_at' => now(),
+        ]);
+
         $this->patchJson("/api/admin/projects/{$project->json('id')}", [
             'estado' => 'en_progreso',
             'progreso' => 30,
+            'recepcion_checklist' => [
+                'alcance_confirmado' => true,
+                'brief_revisado' => true,
+                'insumos_recibidos' => true,
+                'accesos_coordinados' => true,
+            ],
         ])->assertOk()
             ->assertJsonPath('estado', 'en_progreso')
-            ->assertJsonPath('progreso', 30);
+            ->assertJsonPath('progreso', 30)
+            ->assertJsonPath('recepcion_checklist.alcance_confirmado', true)
+            ->assertJsonPath('payments.0.currency', 'PEN');
     }
 
     private function createLead(array $attributes = []): Lead
