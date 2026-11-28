@@ -5,11 +5,13 @@ namespace Tests\Feature;
 use App\Mail\CodigoVerificacionCotizacion;
 use App\Mail\SolicitudRecibida;
 use App\Models\Lead;
+use App\Models\ServiceCartSession;
 use App\Models\Servicio;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class PublicProposalTest extends TestCase
@@ -82,6 +84,83 @@ class PublicProposalTest extends TestCase
             ->assertJsonValidationErrors(['verification_token']);
 
         $this->assertDatabaseCount('leads', 1);
+    }
+
+    public function test_service_cart_session_is_converted_and_contact_consent_is_cleared_on_quote_submission(): void
+    {
+        Mail::fake();
+        $this->seed();
+        $token = (string) Str::uuid();
+        $session = ServiceCartSession::create([
+            'token' => $token,
+            'items' => [
+                ['slug' => 'paginas-web', 'name' => 'Páginas web', 'quantity' => 1],
+            ],
+            'currency' => 'USD',
+            'customer_name' => 'Ana Pérez',
+            'email' => 'ana@example.com',
+            'phone' => '+51912345678',
+            'communications_consented_at' => now(),
+            'status' => 'active',
+            'last_activity_at' => now(),
+        ]);
+
+        $this->postJson('/api/propuestas', [
+            ...$this->verifiedProposalPayload('ana@example.com'),
+            'servicios' => ['Páginas web'],
+            'service_cart_token' => $token,
+            'service_cart_currency' => 'USD',
+        ])->assertCreated();
+
+        $session->refresh();
+        $this->assertSame('converted', $session->status);
+        $this->assertNotNull($session->cotizacion_id);
+        $this->assertNull($session->email);
+        $this->assertNull($session->communications_consented_at);
+    }
+
+    public function test_public_proposal_rejects_a_cart_with_different_services(): void
+    {
+        Mail::fake();
+        $this->seed();
+        $token = (string) Str::uuid();
+
+        ServiceCartSession::create([
+            'token' => $token,
+            'items' => [
+                ['slug' => 'branding', 'name' => 'Branding', 'quantity' => 1],
+            ],
+            'currency' => 'PEN',
+            'status' => 'active',
+            'last_activity_at' => now(),
+        ]);
+
+        $this->postJson('/api/propuestas', [
+            ...$this->verifiedProposalPayload('ana@example.com'),
+            'servicios' => ['Páginas web'],
+            'service_cart_token' => $token,
+            'service_cart_currency' => 'PEN',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['servicios']);
+
+        $this->assertDatabaseCount('leads', 0);
+        $this->assertDatabaseCount('cotizaciones', 0);
+    }
+
+    public function test_public_proposal_rejects_an_unknown_cart_token(): void
+    {
+        Mail::fake();
+        $this->seed();
+
+        $this->postJson('/api/propuestas', [
+            ...$this->verifiedProposalPayload('ana@example.com'),
+            'servicios' => ['Páginas web'],
+            'service_cart_token' => (string) Str::uuid(),
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['service_cart_token']);
+
+        $this->assertDatabaseCount('leads', 0);
+        $this->assertDatabaseCount('cotizaciones', 0);
     }
 
     public function test_invalid_or_inactive_services_do_not_create_a_lead_or_quote(): void
@@ -216,11 +295,43 @@ class PublicProposalTest extends TestCase
         });
     }
 
-    public function test_public_proposal_requires_verified_email_registration_and_consent(): void
+    public function test_public_proposal_creates_lead_and_quote_without_email_otp_token(): void
+    {
+        Mail::fake();
+        $this->seed();
+        Servicio::where('nombre', 'Páginas web')->update(['precio_desde' => 1800]);
+
+        $response = $this->postJson('/api/propuestas', [
+            'nombre' => 'Ana',
+            'apellido' => 'Pérez',
+            'empresa' => 'Tienda de Ana',
+            'pais' => 'Perú',
+            'email' => 'sin-otp@example.com',
+            'telefono' => '+51912345678',
+            'servicios' => ['Páginas web'],
+            'acepta_terminos' => true,
+            'acepta_privacidad' => true,
+            'metodo_pago_preferido' => 'yape',
+            'website' => '',
+        ]);
+
+        $response->assertCreated()
+            ->assertJsonPath('inversion_estimada', 1800)
+            ->assertJsonPath('metodo_pago_preferido', 'yape')
+            ->assertJsonPath('email_enviado', true);
+
+        $this->assertDatabaseHas('leads', [
+            'email' => 'sin-otp@example.com',
+            'servicio' => 'Propuesta personalizada',
+        ]);
+        $this->assertDatabaseCount('cotizaciones', 1);
+    }
+
+    public function test_public_proposal_requires_registration_and_consent_with_spanish_messages(): void
     {
         $this->seed();
 
-        $this->postJson('/api/propuestas', [
+        $response = $this->postJson('/api/propuestas', [
             'nombre' => 'Ana',
             'apellido' => 'Pérez',
             'empresa' => 'Tienda de Ana',
@@ -229,8 +340,11 @@ class PublicProposalTest extends TestCase
             'telefono' => '+51912345678',
             'servicios' => ['Páginas web'],
         ])->assertUnprocessable()
-            ->assertJsonValidationErrors(['verification_token', 'acepta_terminos', 'acepta_privacidad']);
+            ->assertJsonValidationErrors(['acepta_terminos', 'acepta_privacidad'])
+            ->assertJsonMissingValidationErrors(['verification_token']);
 
+        $this->assertNotSame('validation.required', $response->json('errors.acepta_terminos.0'));
+        $this->assertStringContainsString('términos', $response->json('errors.acepta_terminos.0'));
         $this->assertDatabaseCount('leads', 0);
         $this->assertDatabaseCount('cotizaciones', 0);
     }

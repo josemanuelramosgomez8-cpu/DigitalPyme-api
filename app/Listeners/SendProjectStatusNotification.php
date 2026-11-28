@@ -26,12 +26,16 @@ class SendProjectStatusNotification implements ShouldQueue
         }
 
         if ($event->status === 'revision') {
+            $paymentDetails = $this->paymentDetails($project);
             $notifier->notify(
                 eventType: 'project_delivery_ready',
                 email: $user->email,
                 subject: "Tu proyecto {$project->nombre} está listo para revisión",
                 intro: 'Publicamos una entrega para que puedas revisarla y aprobarla o solicitar cambios desde el portal.',
-                details: ['Proyecto: '.$project->nombre],
+                details: [
+                    'Proyecto: '.$project->nombre,
+                    ...$paymentDetails,
+                ],
                 userId: $user->id,
                 actionLabel: 'Revisar entrega',
                 actionUrl: rtrim(config('services.digitalpyme.frontend_url'), '/').'/?portal=1&tab=proyecto',
@@ -40,16 +44,25 @@ class SendProjectStatusNotification implements ShouldQueue
             return;
         }
 
+        $paymentDetails = $this->paymentDetails($project);
+        $statusLabels = [
+            'planificacion' => 'Pedido recibido',
+            'en_progreso' => 'Preparando servicio',
+            'revision' => 'Entrega para revisar',
+            'completado' => 'Servicio entregado',
+            'pausado' => 'En pausa',
+        ];
         $notifier->notify(
             eventType: $event->status === 'completado' ? 'project_completed' : 'project_status_changed',
             email: $user->email,
             subject: $event->status === 'completado'
                 ? "Proyecto completado: {$project->nombre}"
                 : "Avance de tu proyecto: {$project->nombre}",
-            intro: "El estado de tu proyecto cambió a {$event->status}.",
+            intro: 'El estado de tu proyecto cambió a '.($statusLabels[$event->status] ?? $event->status).'.',
             details: [
                 'Proyecto: '.$project->nombre,
                 "Progreso: {$project->progreso} %",
+                ...$paymentDetails,
             ],
             userId: $user->id,
             actionLabel: 'Ver mi proyecto',
@@ -79,5 +92,30 @@ class SendProjectStatusNotification implements ShouldQueue
                 );
             }
         }
+    }
+
+    private function paymentDetails(Project $project): array
+    {
+        $payment = $project->payments()->where('status', 'pagado')->latest('id')->first()
+            ?? $project->payments()->latest('id')->first();
+
+        if (! $payment) {
+            return [
+                'Método de pago: pendiente de definir',
+                'Moneda: pendiente de confirmar',
+            ];
+        }
+
+        $methodLabels = [
+            'bank_transfer' => 'Transferencia bancaria',
+            'yape_plin' => 'Yape o Plin',
+            'card' => 'Tarjeta',
+        ];
+
+        return [
+            'Método de pago: '.($methodLabels[$payment->method] ?? $payment->method),
+            'Moneda de pago: '.$payment->currency,
+            'Importe registrado: '.$payment->currency.' '.number_format((float) $payment->amount, 2),
+        ];
     }
 }

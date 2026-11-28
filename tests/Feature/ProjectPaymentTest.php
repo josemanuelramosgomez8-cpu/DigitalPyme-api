@@ -7,6 +7,7 @@ use App\Models\Client;
 use App\Models\Lead;
 use App\Models\Project;
 use App\Models\ProjectDocument;
+use App\Models\ProjectPayment;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -48,7 +49,17 @@ class ProjectPaymentTest extends TestCase
         $project->cotizacion->update(['estado' => 'enviada']);
 
         $this->actingAs($user)
+            ->getJson("/api/client/projects/{$project->id}/payments")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['project']);
+
+        $this->actingAs($user)
             ->postJson("/api/client/projects/{$project->id}/payments/transfers")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['project']);
+
+        $this->actingAs($user)
+            ->postJson("/api/client/projects/{$project->id}/payments/card")
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['project']);
 
@@ -85,7 +96,24 @@ class ProjectPaymentTest extends TestCase
             ->patchJson("/api/admin/payments/{$payment['id']}", ['status' => 'pagado'])
             ->assertOk()
             ->assertJsonPath('status', 'pagado')
+            ->assertJsonPath('reviewed_by', $admin->id)
+            ->assertJsonPath('reviewer.name', $admin->name)
+            ->assertJsonPath('review_history.0.new_status', 'pagado')
+            ->assertJsonPath('review_history.0.reviewer.name', $admin->name)
             ->assertJsonPath('receipt_email_sent', true);
+
+        $this->assertDatabaseHas('project_payments', [
+            'id' => $payment['id'],
+            'reviewed_by' => $admin->id,
+        ]);
+        $this->assertDatabaseHas('manual_payment_reviews', [
+            'project_payment_id' => $payment['id'],
+            'reviewed_by' => $admin->id,
+            'previous_status' => 'comprobante_enviado',
+            'new_status' => 'pagado',
+        ]);
+        $paymentRecord = ProjectPayment::findOrFail($payment['id']);
+        $this->assertNotNull($paymentRecord->reviewed_at);
 
         $this->actingAs($admin)
             ->patchJson("/api/admin/payments/{$payment['id']}", ['status' => 'rechazado'])
@@ -102,6 +130,82 @@ class ProjectPaymentTest extends TestCase
         $receiptResponse->assertOk()
             ->assertHeader('Content-Type', 'application/pdf');
         $this->assertStringStartsWith('%PDF-', $receiptResponse->getContent());
+    }
+
+    public function test_client_can_submit_transfer_details_and_receipt_in_one_request(): void
+    {
+        Storage::fake('uploads');
+        config([
+            'services.bank_transfer.bank' => 'BCP',
+            'services.bank_transfer.holder' => 'DigitalPyme',
+            'services.bank_transfer.document' => '20123456789',
+        ]);
+        [$user, $project] = $this->clientProject();
+        $receipt = UploadedFile::fake()->createWithContent('voucher.pdf', '%PDF-1.4 voucher');
+
+        $this->actingAs($user)
+            ->withHeader('Accept', 'application/json')
+            ->post('/api/pagos/transferencia', [
+                'proyecto_id' => $project->id,
+                'monto' => '1800.00',
+                'metodo_pago' => 'bank_transfer',
+                'numero_operacion' => 'OP-12345',
+                'comprobante' => $receipt,
+            ])
+            ->assertCreated()
+            ->assertJsonPath('payment.amount', '1800.00')
+            ->assertJsonPath('payment.method', 'bank_transfer')
+            ->assertJsonPath('payment.status', 'comprobante_enviado')
+            ->assertJsonPath('payment.operation_number', 'OP-12345')
+            ->assertJsonPath('payment.receipt.tipo', 'comprobante');
+
+        $payment = ProjectPayment::with('receipt')->firstOrFail();
+        Storage::disk('uploads')->assertExists($payment->receipt->file_path);
+        $this->assertDatabaseHas('project_payments', [
+            'id' => $payment->id,
+            'operation_number' => 'OP-12345',
+            'status' => 'comprobante_enviado',
+        ]);
+
+        $this->actingAs($user)
+            ->getJson("/api/client/projects/{$project->id}/payments")
+            ->assertOk()
+            ->assertJsonPath('totals.paid', 0)
+            ->assertJsonPath('totals.to_verify', 1800)
+            ->assertJsonPath('payments.0.operation_number', 'OP-12345');
+    }
+
+    public function test_client_transfer_rejects_an_incorrect_amount_and_invalid_voucher(): void
+    {
+        Storage::fake('uploads');
+        [$user, $project] = $this->clientProject();
+
+        $this->actingAs($user)
+            ->withHeader('Accept', 'application/json')
+            ->post('/api/pagos/transferencia', [
+                'proyecto_id' => $project->id,
+                'monto' => '1799.99',
+                'metodo_pago' => 'bank_transfer',
+                'numero_operacion' => 'OP-12345',
+                'comprobante' => UploadedFile::fake()->createWithContent('voucher.pdf', '%PDF-1.4 voucher'),
+            ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['monto']);
+
+        $this->actingAs($user)
+            ->withHeader('Accept', 'application/json')
+            ->post('/api/pagos/transferencia', [
+                'proyecto_id' => $project->id,
+                'monto' => '1800.00',
+                'metodo_pago' => 'bank_transfer',
+                'numero_operacion' => 'OP-12345',
+                'comprobante' => UploadedFile::fake()->createWithContent('voucher.txt', 'not a supported voucher'),
+            ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['comprobante']);
+
+        $this->assertDatabaseCount('project_payments', 0);
+        $this->assertSame([], Storage::disk('uploads')->allFiles());
     }
 
     public function test_client_can_submit_yape_plin_payment_with_receipt_for_admin_review(): void

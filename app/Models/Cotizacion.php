@@ -14,11 +14,15 @@ class Cotizacion extends Model
         'descripcion',
         'monto',
         'estado',
+        'responded_at',
     ];
 
     protected function casts(): array
     {
-        return ['monto' => 'decimal:2'];
+        return [
+            'monto' => 'decimal:2',
+            'responded_at' => 'datetime',
+        ];
     }
 
     public function lead(): BelongsTo

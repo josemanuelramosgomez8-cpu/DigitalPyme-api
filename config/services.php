@@ -57,6 +57,7 @@ return [
     'bank_transfer' => [
         'bank' => env('BANK_TRANSFER_BANK'),
         'holder' => env('BANK_TRANSFER_HOLDER'),
+        'document' => env('BANK_TRANSFER_DOCUMENT'),
         'account' => env('BANK_TRANSFER_ACCOUNT'),
         'cci' => env('BANK_TRANSFER_CCI'),
     ],

@@ -2,14 +2,14 @@
 
 namespace Tests\Feature;
 
+use App\Mail\StoreOrderConfirmation;
 use App\Models\Client;
 use App\Models\StockMovement;
-use App\Models\StoreOrder;
 use App\Models\StoreCoupon;
+use App\Models\StoreOrder;
 use App\Models\StoreProduct;
 use App\Models\StoreReturn;
 use App\Models\User;
-use App\Mail\StoreOrderConfirmation;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
@@ -947,7 +947,14 @@ class StoreLogisticsTest extends TestCase
             'payment_status' => 'pagado',
         ])->assertOk()
             ->assertJsonPath('payment_status', 'pagado')
+            ->assertJsonPath('payment_reviewed_by', $admin->id)
+            ->assertJsonPath('payment_review_history.0.new_status', 'pagado')
             ->assertJsonPath('receipt_email_sent', false);
+        $this->assertDatabaseHas('store_orders', [
+            'id' => $orderId,
+            'payment_reviewed_by' => $admin->id,
+        ]);
+        $this->assertDatabaseCount('manual_payment_reviews', 2);
         Mail::assertSent(StoreOrderConfirmation::class, 2);
         Mail::assertSent(StoreOrderConfirmation::class, fn (StoreOrderConfirmation $mail) => $mail->order->payment_status === 'pagado');
 

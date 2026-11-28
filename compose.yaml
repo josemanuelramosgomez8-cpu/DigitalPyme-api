@@ -1,21 +1,89 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   app:
     build: .
     restart: unless-stopped
+    logging: *default-logging
     env_file: .env
     ports:
       - "${APP_PORT:-8080}:80"
     environment:
       UPLOADS_PATH: /var/www/html/storage/app/private
+      CACHE_STORE: redis
+      LOG_CHANNEL: stderr
+      LOG_LEVEL: info
+      QUEUE_CONNECTION: redis
+      REDIS_HOST: redis
+      SESSION_DRIVER: redis
     volumes:
       - uploads:/var/www/html/storage/app/private
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost/up >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   scheduler:
     build: .
     restart: unless-stopped
+    logging: *default-logging
     env_file: .env
     command: ["php", "artisan", "schedule:work"]
+    environment:
+      CACHE_STORE: redis
+      LOG_CHANNEL: stderr
+      LOG_LEVEL: info
+      QUEUE_CONNECTION: redis
+      REDIS_HOST: redis
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  queue:
+    build: .
+    restart: unless-stopped
+    logging: *default-logging
+    env_file: .env
+    command: ["php", "artisan", "queue:work", "--sleep=3", "--tries=3", "--timeout=60"]
+    stop_grace_period: 70s
+    environment:
+      UPLOADS_PATH: /var/www/html/storage/app/private
+      CACHE_STORE: redis
+      LOG_CHANNEL: stderr
+      LOG_LEVEL: info
+      QUEUE_CONNECTION: redis
+      REDIS_HOST: redis
+      SESSION_DRIVER: redis
+    volumes:
+      - uploads:/var/www/html/storage/app/private
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   uploads:
     name: digitalpyme-uploads
+  redis-data:
+    name: digitalpyme-redis-data

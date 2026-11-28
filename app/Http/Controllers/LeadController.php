@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Lead;
 use App\Models\Servicio;
+use App\Support\AdminJsonPagination;
 use App\Support\SolicitudNotifier;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -43,13 +44,12 @@ class LeadController extends Controller
     // Protegido: solo el administrador
     public function index(Request $request)
     {
-        $leads = Lead::query()
+        $leads = AdminJsonPagination::paginate(Lead::query()
             ->with(['cotizaciones', 'client:id,lead_id,user_id'])
             ->when($request->query('estado'), fn ($q, $estado) => $q->where('estado', $estado))
-            ->latest()
-            ->get();
+            ->latest(), $request);
 
-        return response()->json($leads);
+        return AdminJsonPagination::respond($leads);
     }
 
     // Protegido: cambiar el estado de un lead

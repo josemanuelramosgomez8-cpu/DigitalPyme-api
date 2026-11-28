@@ -26,7 +26,16 @@ class CotizacionNotifier
         try {
             Mail::to($email)->send(new CotizacionEnviada($cotizacion));
 
-            return ! in_array(config('mail.default'), ['log', 'array'], true);
+            return in_array(config('mail.default'), [
+                'smtp',
+                'sendmail',
+                'mailgun',
+                'ses',
+                'ses-v2',
+                'postmark',
+                'resend',
+                'roundrobin',
+            ], true);
         } catch (TransportExceptionInterface $exception) {
             Log::error('No se pudo enviar por correo una cotización DigitalPyme.', [
                 'cotizacion_id' => $cotizacion->id,

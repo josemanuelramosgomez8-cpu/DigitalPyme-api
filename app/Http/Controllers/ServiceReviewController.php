@@ -4,7 +4,11 @@ namespace App\Http\Controllers;
 
 use App\Models\ServiceReview;
 use App\Models\Servicio;
+use App\Support\AdminJsonPagination;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use PDOException;
 
 class ServiceReviewController extends Controller
 {
@@ -15,18 +19,47 @@ class ServiceReviewController extends Controller
             'limit' => ['sometimes', 'integer', 'min:1', 'max:50'],
         ]);
 
-        return response()->json(
-            ServiceReview::query()
+        $cache = Cache::store('file');
+        $staleCacheKey = 'public-service-reviews:last-successful';
+        $fallbackCacheKey = 'public-service-reviews:database-outage';
+        $usingFallback = false;
+
+        try {
+            $reviews = ServiceReview::query()
                 ->where('aprobada', true)
                 ->whereHas('service', fn ($query) => $query->where('activo', true))
                 ->with('service:id,nombre,slug')
                 ->select(['id', 'servicio_id', 'nombre', 'calificacion', 'titulo', 'comentario', 'created_at'])
                 ->orderByDesc('created_at')
                 ->orderByDesc('id')
-                ->offset($pagination['offset'] ?? 0)
-                ->limit($pagination['limit'] ?? 6)
-                ->get()
-        );
+                ->get();
+
+            $cache->put($staleCacheKey, $reviews, now()->addDays(7));
+            $cache->forget($fallbackCacheKey);
+        } catch (QueryException|PDOException $exception) {
+            $usingFallback = true;
+            $reviews = $cache->remember($fallbackCacheKey, now()->addMinutes(10), function () use ($cache, $staleCacheKey, $exception) {
+                $cachedReviews = $cache->get($staleCacheKey);
+                if ($cachedReviews === null) {
+                    throw $exception;
+                }
+
+                return $cachedReviews;
+            });
+        }
+
+        $offset = $pagination['offset'] ?? 0;
+        $limit = $pagination['limit'] ?? 6;
+
+        return response()->json([
+            'data' => $reviews->slice($offset, $limit)->values(),
+            'meta' => [
+                'total' => $reviews->count(),
+                'offset' => $offset,
+                'limit' => $limit,
+            ],
+            'status' => $usingFallback ? 'degraded' : 'success',
+        ]);
     }
 
     public function index(Servicio $servicio)
@@ -57,11 +90,14 @@ class ServiceReviewController extends Controller
         ], 201);
     }
 
-    public function adminIndex()
+    public function adminIndex(Request $request)
     {
-        return response()->json(
-            ServiceReview::with('service:id,nombre')->latest()->get()
+        $reviews = AdminJsonPagination::paginate(
+            ServiceReview::with('service:id,nombre')->latest(),
+            $request,
         );
+
+        return AdminJsonPagination::respond($reviews);
     }
 
     public function moderate(Request $request, ServiceReview $serviceReview)

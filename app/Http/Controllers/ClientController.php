@@ -6,6 +6,7 @@ use App\Mail\ClientRegisteredNotification;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\User;
+use App\Support\AdminJsonPagination;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -154,27 +155,29 @@ class ClientController extends Controller
     {
         $search = trim((string) $request->query('search', ''));
 
-        $clients = Client::query()
-            ->with([
-                'user:id,name,email,is_active,must_change_password,created_at',
-                'lead:id,nombre,email,telefono,created_at',
-            ])
-            ->when($search !== '', function ($query) use ($search) {
-                $query->where(function ($query) use ($search) {
-                    $query->where('nombre', 'like', "%{$search}%")
-                        ->orWhereHas('user', function ($userQuery) use ($search) {
-                            $userQuery->where('name', 'like', "%{$search}%")
-                                ->orWhere('email', 'like', "%{$search}%");
-                        })
-                        ->orWhereHas('lead', function ($leadQuery) use ($search) {
-                            $leadQuery->where('telefono', 'like', "%{$search}%");
-                        });
-                });
-            })
-            ->latest()
-            ->get();
+        $clients = AdminJsonPagination::paginate(
+            Client::query()
+                ->with([
+                    'user:id,name,email,is_active,must_change_password,created_at',
+                    'lead:id,nombre,email,telefono,created_at',
+                ])
+                ->when($search !== '', function ($query) use ($search) {
+                    $query->where(function ($query) use ($search) {
+                        $query->where('nombre', 'like', "%{$search}%")
+                            ->orWhereHas('user', function ($userQuery) use ($search) {
+                                $userQuery->where('name', 'like', "%{$search}%")
+                                    ->orWhere('email', 'like', "%{$search}%");
+                            })
+                            ->orWhereHas('lead', function ($leadQuery) use ($search) {
+                                $leadQuery->where('telefono', 'like', "%{$search}%");
+                            });
+                    });
+                })
+                ->latest(),
+            $request,
+        );
 
-        return response()->json($clients);
+        return AdminJsonPagination::respond($clients);
     }
 
     public function show(Client $client)

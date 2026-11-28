@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\AgendaReservation;
 use App\Models\AgendaSlot;
+use App\Support\AdminJsonPagination;
 use App\Support\SolicitudNotifier;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
@@ -65,7 +66,7 @@ class AgendaController extends Controller
                 ->lockForUpdate()
                 ->firstOrFail();
 
-            if (!$slot->active || $slot->available < 1 || $slot->date->isBefore(now()->startOfDay())) {
+            if (! $slot->active || $slot->available < 1 || $slot->date->isBefore(now()->startOfDay())) {
                 throw ValidationException::withMessages([
                     'agenda_slot_id' => 'Este horario ya no está disponible. Elige otro horario.',
                 ]);
@@ -146,16 +147,18 @@ class AgendaController extends Controller
         ]);
         $month = CarbonImmutable::createFromFormat('!Y-m', $datos['month']);
 
-        return response()->json(
+        $reservations = AdminJsonPagination::paginate(
             AgendaReservation::with('slot:id,date,time')
                 ->where('estado', 'reservada')
                 ->whereHas('slot', fn ($query) => $query->whereBetween('date', [
                     $month->startOfMonth()->toDateString(),
                     $month->endOfMonth()->toDateString(),
                 ]))
-                ->orderByDesc('id')
-                ->get()
+                ->orderByDesc('id'),
+            $request,
         );
+
+        return AdminJsonPagination::respond($reservations);
     }
 
     public function cancelReservation(AgendaReservation $reservation)

@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Mail\CotizacionEnviada;
+use App\Models\Client;
 use App\Models\Cotizacion;
 use App\Models\Lead;
 use App\Models\User;
@@ -96,6 +97,132 @@ class CotizacionTest extends TestCase
             ->assertJsonPath('email_enviado', true);
 
         Mail::assertSent(CotizacionEnviada::class, 2);
+    }
+
+    public function test_quote_delivery_reports_failure_when_only_the_log_mailer_is_configured(): void
+    {
+        Mail::fake();
+        config(['mail.default' => 'log']);
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+        $quote = $this->createQuote($this->createLead());
+
+        $this->patchJson("/api/cotizaciones/{$quote->id}", ['estado' => 'enviada'])
+            ->assertOk()
+            ->assertJsonPath('estado', 'enviada')
+            ->assertJsonPath('email_enviado', false)
+            ->assertJsonPath(
+                'mensaje',
+                'La cotización quedó marcada como enviada, pero no se pudo entregar el correo. Configura y verifica el servicio SMTP antes de informar al cliente.'
+            );
+
+        $this->postJson("/api/cotizaciones/{$quote->id}/reenviar")
+            ->assertOk()
+            ->assertJsonPath('email_enviado', false)
+            ->assertJsonPath(
+                'mensaje',
+                'No se pudo reenviar la cotización. Verifica la configuración SMTP y vuelve a intentarlo.'
+            );
+    }
+
+    public function test_client_can_list_and_accept_only_its_sent_quotes_once(): void
+    {
+        $lead = $this->createLead();
+        $quote = $this->createQuote($lead, ['estado' => 'enviada']);
+        $otherLead = $this->createLead(['nombre' => 'Otro cliente', 'email' => 'otro@example.com']);
+        $this->createQuote($otherLead, ['estado' => 'enviada']);
+        $user = User::factory()->create([
+            'email' => $lead->email,
+            'is_client' => true,
+        ]);
+        $client = Client::create([
+            'user_id' => $user->id,
+            'lead_id' => $lead->id,
+            'nombre' => $lead->nombre,
+        ]);
+
+        $this->actingAs($user)
+            ->getJson('/api/client/cotizaciones')
+            ->assertOk()
+            ->assertJsonCount(1)
+            ->assertJsonPath('0.id', $quote->id);
+
+        $response = $this->postJson("/api/client/cotizaciones/{$quote->id}/respuesta", [
+            'respuesta' => 'aceptada',
+        ])->assertOk()
+            ->assertJsonPath('estado', 'aceptada')
+            ->assertJsonPath('lead_id', $lead->id);
+
+        $this->assertNotNull($response->json('responded_at'));
+        $this->assertDatabaseHas('cotizaciones', [
+            'id' => $quote->id,
+            'estado' => 'aceptada',
+        ]);
+        $this->assertDatabaseHas('projects', [
+            'cotizacion_id' => $quote->id,
+            'client_id' => $client->id,
+            'estado' => 'planificacion',
+        ]);
+        $this->assertDatabaseHas('project_monthly_capacities', [
+            'month' => now()->startOfMonth()->toDateString(),
+            'reserved' => 1,
+        ]);
+
+        $this->postJson("/api/client/cotizaciones/{$quote->id}/respuesta", [
+            'respuesta' => 'aceptada',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['cotizacion']);
+        $this->assertDatabaseCount('projects', 1);
+    }
+
+    public function test_client_can_reject_its_sent_quote_without_creating_a_project(): void
+    {
+        $lead = $this->createLead();
+        $quote = $this->createQuote($lead, ['estado' => 'enviada']);
+        $user = User::factory()->create([
+            'email' => $lead->email,
+            'is_client' => true,
+        ]);
+        Client::create([
+            'user_id' => $user->id,
+            'lead_id' => $lead->id,
+            'nombre' => $lead->nombre,
+        ]);
+
+        $response = $this->actingAs($user)
+            ->postJson("/api/client/cotizaciones/{$quote->id}/respuesta", [
+                'respuesta' => 'rechazada',
+            ])->assertOk()
+            ->assertJsonPath('estado', 'rechazada');
+
+        $this->assertNotNull($response->json('responded_at'));
+        $this->assertDatabaseMissing('projects', ['cotizacion_id' => $quote->id]);
+    }
+
+    public function test_client_cannot_view_or_respond_to_another_clients_quote(): void
+    {
+        $lead = $this->createLead(['email' => 'owner@example.com']);
+        $quote = $this->createQuote($lead, ['estado' => 'enviada']);
+        $user = User::factory()->create([
+            'email' => 'different@example.com',
+            'is_client' => true,
+        ]);
+        Client::create(['user_id' => $user->id, 'nombre' => 'Otro cliente']);
+
+        $this->actingAs($user)
+            ->getJson('/api/client/cotizaciones')
+            ->assertOk()
+            ->assertJsonCount(0);
+
+        $this->postJson("/api/client/cotizaciones/{$quote->id}/respuesta", [
+            'respuesta' => 'aceptada',
+        ])->assertNotFound();
+
+        $this->assertDatabaseHas('cotizaciones', [
+            'id' => $quote->id,
+            'estado' => 'enviada',
+            'responded_at' => null,
+        ]);
+        $this->assertDatabaseMissing('projects', ['cotizacion_id' => $quote->id]);
     }
 
     public function test_quote_without_a_confirmed_amount_cannot_be_sent_or_accepted(): void

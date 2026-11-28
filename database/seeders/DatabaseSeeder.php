@@ -210,6 +210,7 @@ class DatabaseSeeder extends Seeder
             }
         }
 
+        $this->call(ProyectoSeeder::class);
         $this->call(StoreDemoSeeder::class);
     }
 }

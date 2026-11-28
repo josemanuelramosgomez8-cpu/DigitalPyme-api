@@ -2,10 +2,13 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\ManualPaymentReview;
 use App\Models\Project;
+use App\Models\ProjectDocument;
 use App\Models\ProjectMilestone;
 use App\Models\ProjectPayment;
 use App\Models\StoreOrder;
+use App\Support\AdminJsonPagination;
 use App\Support\PaymentReceiptNotifier;
 use App\Support\PaymentReceiptPdf;
 use App\Support\StoreOrderNotifier;
@@ -13,6 +16,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -23,16 +27,22 @@ class ProjectPaymentController extends Controller
     public function clientIndex(Request $request, Project $project)
     {
         $this->ensureClientOwnsProject($request, $project);
+        $this->ensureProjectHasAcceptedQuote($project);
 
         return response()->json([
             'payments' => $project->payments()
                 ->with(['milestone:id,titulo', 'receipt:id,payment_id,original_name,tipo,mime_type,size,created_at'])
                 ->latest()
                 ->get(),
+            'totals' => [
+                'paid' => (float) $project->payments()->where('status', 'pagado')->sum('amount'),
+                'to_verify' => (float) $project->payments()->where('status', 'comprobante_enviado')->sum('amount'),
+            ],
             'card_enabled' => filled(config('services.mercadopago.access_token')),
             'bank_transfer' => [
                 'bank' => config('services.bank_transfer.bank'),
                 'holder' => config('services.bank_transfer.holder'),
+                'document' => config('services.bank_transfer.document'),
                 'account' => config('services.bank_transfer.account'),
                 'cci' => config('services.bank_transfer.cci'),
             ],
@@ -48,6 +58,7 @@ class ProjectPaymentController extends Controller
     public function startTransfer(Request $request, Project $project)
     {
         $this->ensureClientOwnsProject($request, $project);
+        $this->ensureProjectHasAcceptedQuote($project);
         $datos = $request->validate([
             'method' => ['sometimes', Rule::in(ProjectPayment::MANUAL_METHODS)],
             'milestone_id' => [
@@ -78,9 +89,94 @@ class ProjectPaymentController extends Controller
         ], 201);
     }
 
+    public function submitTransfer(Request $request)
+    {
+        $datos = $request->validate([
+            'proyecto_id' => ['required', 'integer', 'exists:projects,id'],
+            'monto' => ['required', 'numeric', 'gt:0'],
+            'metodo_pago' => ['required', Rule::in(ProjectPayment::MANUAL_METHODS)],
+            'numero_operacion' => ['required', 'string', 'max:120'],
+            'comprobante' => ['required', 'file', 'mimes:jpg,jpeg,png,pdf', 'max:5120'],
+            'milestone_id' => [
+                'nullable',
+                'integer',
+                Rule::exists('project_milestones', 'id')
+                    ->where('project_id', $request->input('proyecto_id')),
+            ],
+        ], [
+            'proyecto_id.required' => 'Selecciona el proyecto al que corresponde el pago.',
+            'monto.required' => 'Indica el monto transferido.',
+            'monto.numeric' => 'El monto debe ser un valor numérico.',
+            'metodo_pago.required' => 'Selecciona el banco o medio utilizado.',
+            'metodo_pago.in' => 'Selecciona transferencia bancaria o Yape/Plin.',
+            'numero_operacion.required' => 'Ingresa el número de operación.',
+            'comprobante.required' => 'Adjunta el comprobante de transferencia.',
+            'comprobante.mimes' => 'El comprobante debe ser una imagen JPG, PNG o un archivo PDF.',
+            'comprobante.max' => 'El comprobante no puede superar los 5 MB.',
+        ]);
+
+        $project = Project::findOrFail($datos['proyecto_id']);
+        $this->ensureClientOwnsProject($request, $project);
+        $this->ensureProjectHasAcceptedQuote($project);
+
+        if ($datos['metodo_pago'] === 'yape_plin' && (
+            ! config('services.yape_plin.enabled')
+            || blank(config('services.yape_plin.phone'))
+        )) {
+            return response()->json([
+                'message' => 'El pago con Yape/Plin aún no está habilitado.',
+                'code' => 'yape_plin_not_configured',
+            ], 503);
+        }
+
+        $file = $request->file('comprobante');
+        $path = $file->store("projects/{$project->id}/receipts", 'uploads');
+        if (! is_string($path) || $path === '') {
+            abort(500, 'No se pudo guardar el comprobante.');
+        }
+
+        try {
+            $payment = DB::transaction(function () use ($request, $project, $datos, $file, $path) {
+                $payment = $this->createPaymentRecord(
+                    $project,
+                    $datos['milestone_id'] ?? null,
+                    $datos['metodo_pago'],
+                    (int) round((float) $datos['monto'] * 100),
+                );
+                $payment->update([
+                    'operation_number' => trim($datos['numero_operacion']),
+                    'status' => 'comprobante_enviado',
+                ]);
+                $project->documents()->create([
+                    'uploaded_by_user_id' => $request->user()->id,
+                    'payment_id' => $payment->id,
+                    'original_name' => $file->getClientOriginalName(),
+                    'tipo' => 'comprobante',
+                    'file_path' => $path,
+                    'mime_type' => $file->getMimeType() ?: 'application/octet-stream',
+                    'size' => $file->getSize(),
+                ]);
+
+                return $payment->load([
+                    'milestone:id,titulo',
+                    'receipt:id,payment_id,original_name,tipo,mime_type,size,created_at',
+                ]);
+            });
+        } catch (Throwable $exception) {
+            Storage::disk('uploads')->delete($path);
+            throw $exception;
+        }
+
+        return response()->json([
+            'mensaje' => 'Comprobante enviado. El administrador revisará tu transferencia.',
+            'payment' => $payment,
+        ], 201);
+    }
+
     public function startCardPayment(Request $request, Project $project)
     {
         $this->ensureClientOwnsProject($request, $project);
+        $this->ensureProjectHasAcceptedQuote($project);
         $datos = $request->validate([
             'milestone_id' => [
                 'nullable',
@@ -169,8 +265,7 @@ class ProjectPaymentController extends Controller
         Request $request,
         PaymentReceiptNotifier $receiptNotifier,
         StoreOrderNotifier $storeOrderNotifier,
-    )
-    {
+    ) {
         $providerPaymentId = $request->input('data.id') ?? $request->query('id');
         if (! is_string($providerPaymentId) && ! is_numeric($providerPaymentId)) {
             return response()->json(['mensaje' => 'Notificación recibida.']);
@@ -305,18 +400,23 @@ class ProjectPaymentController extends Controller
             'status' => ['nullable', Rule::in(ProjectPayment::STATUSES)],
         ]);
 
-        return response()->json(
+        $payments = AdminJsonPagination::paginate(
             ProjectPayment::query()
                 ->with([
                     'project:id,client_id,nombre',
                     'project.client:id,nombre,empresa',
                     'milestone:id,titulo',
                     'receipt:id,payment_id,original_name,tipo,mime_type,size,created_at',
+                    'reviewer:id,name',
+                    'reviewHistory.reviewer:id,name',
                 ])
                 ->when($datos['status'] ?? null, fn ($query, $status) => $query->where('status', $status))
-                ->latest()
-                ->get()
+                ->latest(),
+            $request,
         );
+        collect($payments->items())->each->makeVisible(['reviewed_by', 'reviewed_at']);
+
+        return AdminJsonPagination::respond($payments);
     }
 
     public function adminUpdateStatus(Request $request, ProjectPayment $payment, PaymentReceiptNotifier $receiptNotifier)
@@ -325,7 +425,7 @@ class ProjectPaymentController extends Controller
             'status' => ['required', Rule::in(['pagado', 'rechazado'])],
         ]);
 
-        $updatedPayment = DB::transaction(function () use ($payment, $datos) {
+        [$updatedPayment, $previousStatus] = DB::transaction(function () use ($request, $payment, $datos) {
             $lockedPayment = ProjectPayment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
 
             if (! in_array($lockedPayment->method, ProjectPayment::MANUAL_METHODS, true) || $lockedPayment->status !== 'comprobante_enviado') {
@@ -340,13 +440,32 @@ class ProjectPaymentController extends Controller
                 ]);
             }
 
+            $previousStatus = $lockedPayment->status;
             $lockedPayment->update([
                 'status' => $datos['status'],
                 'paid_at' => $datos['status'] === 'pagado' ? now() : null,
+                'reviewed_by' => $request->user()->id,
+                'reviewed_at' => now(),
+            ]);
+            ManualPaymentReview::create([
+                'project_payment_id' => $lockedPayment->id,
+                'reviewed_by' => $request->user()->id,
+                'previous_status' => $previousStatus,
+                'new_status' => $datos['status'],
+                'reviewed_at' => now(),
             ]);
 
-            return $lockedPayment->refresh();
+            return [$lockedPayment->refresh(), $previousStatus];
         });
+        Log::info('Se revisó un comprobante de pago de proyecto.', [
+            'payment_id' => $updatedPayment->id,
+            'project_id' => $updatedPayment->project_id,
+            'reviewer_id' => $updatedPayment->reviewed_by,
+            'previous_status' => $previousStatus,
+            'new_status' => $updatedPayment->status,
+        ]);
+        $updatedPayment->load(['reviewer:id,name', 'reviewHistory.reviewer:id,name'])
+            ->makeVisible(['reviewed_by', 'reviewed_at']);
 
         $receiptEmailSent = $datos['status'] === 'pagado'
             ? $receiptNotifier->send($updatedPayment)
@@ -373,85 +492,111 @@ class ProjectPaymentController extends Controller
 
     private function createPayment(Project $project, ?int $milestoneId, string $method): ProjectPayment
     {
-        return DB::transaction(function () use ($project, $milestoneId, $method) {
-            $lockedProject = Project::whereKey($project->id)->lockForUpdate()->firstOrFail();
+        return DB::transaction(
+            fn () => $this->createPaymentRecord($project, $milestoneId, $method)
+        );
+    }
 
-            if (! $lockedProject->cotizacion || $lockedProject->cotizacion->estado !== 'aceptada') {
-                throw ValidationException::withMessages([
-                    'project' => 'Solo se pueden pagar proyectos con una cotización aceptada.',
-                ]);
-            }
+    private function createPaymentRecord(
+        Project $project,
+        ?int $milestoneId,
+        string $method,
+        ?int $expectedAmountCents = null,
+    ): ProjectPayment {
+        $lockedProject = Project::whereKey($project->id)->lockForUpdate()->firstOrFail();
 
-            $milestone = null;
-            if ($milestoneId !== null) {
-                $milestone = ProjectMilestone::whereKey($milestoneId)
-                    ->where('project_id', $lockedProject->id)
-                    ->lockForUpdate()
-                    ->firstOrFail();
-
-                if ($milestone->estado !== 'aprobado' || $milestone->monto === null || (float) $milestone->monto <= 0) {
-                    throw ValidationException::withMessages([
-                        'milestone_id' => 'Solo se pueden pagar hitos aprobados con un monto válido.',
-                    ]);
-                }
-
-                $amount = (float) $milestone->monto;
-            } else {
-                $amount = (float) $lockedProject->cotizacion->monto;
-            }
-
-            if ($amount <= 0) {
-                throw ValidationException::withMessages([
-                    'amount' => 'El monto del proyecto debe ser mayor que cero.',
-                ]);
-            }
-
-            $activeStatuses = ['pendiente', 'comprobante_enviado', 'pagado'];
-            $existingPayments = $lockedProject->payments()
-                ->whereIn('status', $activeStatuses)
-                ->get(['id', 'milestone_id', 'amount']);
-
-            $hasExistingFullPayment = $existingPayments->contains(fn (ProjectPayment $existing) => $existing->milestone_id === null);
-            $alreadyPaidForMilestone = $existingPayments->contains(
-                fn (ProjectPayment $existing) => $existing->milestone_id === $milestoneId
-            );
-            $quoteAmountCents = (int) round((float) $lockedProject->cotizacion->monto * 100);
-            $existingAmountCents = $existingPayments->sum(
-                fn (ProjectPayment $existing) => (int) round((float) $existing->amount * 100)
-            );
-            $paymentAmountCents = (int) round($amount * 100);
-
-            if (
-                $alreadyPaidForMilestone
-                || ($milestoneId === null && $existingPayments->isNotEmpty())
-                || ($milestoneId !== null && $hasExistingFullPayment)
-            ) {
-                throw ValidationException::withMessages([
-                    'payment' => 'Ya existe un pago vigente para este proyecto o hito.',
-                ]);
-            }
-
-            if ($milestoneId !== null && $existingAmountCents + $paymentAmountCents > $quoteAmountCents) {
-                throw ValidationException::withMessages([
-                    'milestone_id' => 'El total de los pagos por hitos superaría el presupuesto aceptado.',
-                ]);
-            }
-
-            return ProjectPayment::create([
-                'reference' => (string) Str::uuid(),
-                'project_id' => $lockedProject->id,
-                'milestone_id' => $milestone?->id,
-                'method' => $method,
-                'provider' => $method === 'card' ? 'mercadopago' : null,
-                'amount' => $amount,
-                'currency' => 'PEN',
-                'status' => 'pendiente',
+        if (! $lockedProject->cotizacion || $lockedProject->cotizacion->estado !== 'aceptada') {
+            throw ValidationException::withMessages([
+                'project' => 'Solo se pueden pagar proyectos con una cotización aceptada.',
             ]);
-        });
+        }
+
+        $milestone = null;
+        if ($milestoneId !== null) {
+            $milestone = ProjectMilestone::whereKey($milestoneId)
+                ->where('project_id', $lockedProject->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($milestone->estado !== 'aprobado' || $milestone->monto === null || (float) $milestone->monto <= 0) {
+                throw ValidationException::withMessages([
+                    'milestone_id' => 'Solo se pueden pagar hitos aprobados con un monto válido.',
+                ]);
+            }
+
+            $amount = (float) $milestone->monto;
+        } else {
+            $amount = (float) $lockedProject->cotizacion->monto;
+        }
+
+        if ($amount <= 0) {
+            throw ValidationException::withMessages([
+                'amount' => 'El monto del proyecto debe ser mayor que cero.',
+            ]);
+        }
+
+        $activeStatuses = ['pendiente', 'comprobante_enviado', 'pagado'];
+        $existingPayments = $lockedProject->payments()
+            ->whereIn('status', $activeStatuses)
+            ->get(['id', 'milestone_id', 'amount']);
+
+        $hasExistingFullPayment = $existingPayments->contains(fn (ProjectPayment $existing) => $existing->milestone_id === null);
+        $alreadyPaidForMilestone = $existingPayments->contains(
+            fn (ProjectPayment $existing) => $existing->milestone_id === $milestoneId
+        );
+        $quoteAmountCents = (int) round((float) $lockedProject->cotizacion->monto * 100);
+        $existingAmountCents = $existingPayments->sum(
+            fn (ProjectPayment $existing) => (int) round((float) $existing->amount * 100)
+        );
+        $paymentAmountCents = (int) round($amount * 100);
+
+        if ($expectedAmountCents !== null && $paymentAmountCents !== $expectedAmountCents) {
+            throw ValidationException::withMessages([
+                'monto' => 'El monto debe coincidir exactamente con el importe del proyecto o hito seleccionado.',
+            ]);
+        }
+
+        if (
+            $alreadyPaidForMilestone
+            || ($milestoneId === null && $existingPayments->isNotEmpty())
+            || ($milestoneId !== null && $hasExistingFullPayment)
+        ) {
+            throw ValidationException::withMessages([
+                'payment' => 'Ya existe un pago vigente para este proyecto o hito.',
+            ]);
+        }
+
+        if ($milestoneId !== null && $existingAmountCents + $paymentAmountCents > $quoteAmountCents) {
+            throw ValidationException::withMessages([
+                'milestone_id' => 'El total de los pagos por hitos superaría el presupuesto aceptado.',
+            ]);
+        }
+
+        return ProjectPayment::create([
+            'reference' => (string) Str::uuid(),
+            'project_id' => $lockedProject->id,
+            'milestone_id' => $milestone?->id,
+            'method' => $method,
+            'provider' => $method === 'card' ? 'mercadopago' : null,
+            'amount' => $amount,
+            'currency' => 'PEN',
+            'status' => 'pendiente',
+        ]);
     }
 
     private function ensureClientOwnsProject(Request $request, Project $project): void
     {
         abort_unless($project->client_id === $request->user()->client->id, 404);
+    }
+
+    private function ensureProjectHasAcceptedQuote(Project $project): void
+    {
+        $project->loadMissing('cotizacion');
+
+        if (! $project->cotizacion || $project->cotizacion->estado !== 'aceptada') {
+            throw ValidationException::withMessages([
+                'project' => 'Los pagos solo están disponibles para proyectos con una cotización aceptada.',
+            ]);
+        }
     }
 }

@@ -62,6 +62,44 @@ class AdminAccessTest extends TestCase
             ->assertJsonCount(1);
     }
 
+    public function test_admin_lead_list_is_paginated_without_changing_its_array_response(): void
+    {
+        $admin = User::factory()->create(['is_admin' => true]);
+        foreach (['Uno', 'Dos', 'Tres'] as $name) {
+            Lead::create([
+                'nombre' => $name,
+                'email' => strtolower($name).'@example.com',
+                'servicio' => 'Página web',
+            ]);
+        }
+
+        $this->actingAs($admin)
+            ->getJson('/api/leads?per_page=2&page=2')
+            ->assertOk()
+            ->assertJsonCount(1)
+            ->assertHeader('X-Pagination-Total', '3')
+            ->assertHeader('X-Pagination-Current-Page', '2')
+            ->assertHeader('X-Pagination-Last-Page', '2');
+
+        $this->getJson('/api/leads?per_page=101')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['per_page']);
+    }
+
+    public function test_api_responses_include_security_headers(): void
+    {
+        $this->getJson('/api/servicios')
+            ->assertOk()
+            ->assertHeader('X-Content-Type-Options', 'nosniff')
+            ->assertHeader('X-Frame-Options', 'DENY')
+            ->assertHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+            ->assertHeader('Permissions-Policy', 'camera=(), geolocation=(), microphone=()');
+
+        $this->getJson('https://localhost/api/servicios')
+            ->assertOk()
+            ->assertHeader('Strict-Transport-Security', 'max-age=15552000');
+    }
+
     public function test_admin_dashboard_returns_operational_metrics_and_rejects_non_admins(): void
     {
         $lead = Lead::create([
@@ -91,7 +129,18 @@ class AdminAccessTest extends TestCase
             ->assertJsonPath('pagos_por_verificar', 0)
             ->assertJsonPath('ingresos_confirmados', 0)
             ->assertJsonPath('reservas_del_mes', 0)
-            ->assertJsonPath('cupos_proyecto', null);
+            ->assertJsonPath('cupos_proyecto', null)
+            ->assertJsonPath('proyectos_vencidos', [])
+            ->assertJsonPath('variacion_ingresos_porcentaje', null)
+            ->assertJsonStructure([
+                'periodo',
+                'solicitudes_recientes',
+                'proximas_entregas',
+                'pagos_pendientes',
+                'proximas_reservas',
+                'acciones_rapidas',
+                'inventario' => ['alertas'],
+            ]);
     }
 
     public function test_admin_users_can_log_in_and_receive_an_api_token(): void

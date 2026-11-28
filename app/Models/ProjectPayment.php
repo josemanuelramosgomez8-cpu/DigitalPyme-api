@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class ProjectPayment extends Model
@@ -27,17 +28,23 @@ class ProjectPayment extends Model
         'method',
         'provider',
         'provider_reference',
+        'operation_number',
         'amount',
         'currency',
         'status',
         'paid_at',
+        'reviewed_by',
+        'reviewed_at',
     ];
+
+    protected $hidden = ['reviewed_by', 'reviewed_at'];
 
     protected function casts(): array
     {
         return [
             'amount' => 'decimal:2',
             'paid_at' => 'datetime',
+            'reviewed_at' => 'datetime',
         ];
     }
 
@@ -54,5 +61,15 @@ class ProjectPayment extends Model
     public function receipt(): HasOne
     {
         return $this->hasOne(ProjectDocument::class, 'payment_id');
+    }
+
+    public function reviewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'reviewed_by');
+    }
+
+    public function reviewHistory(): HasMany
+    {
+        return $this->hasMany(ManualPaymentReview::class)->orderByDesc('id');
     }
 }

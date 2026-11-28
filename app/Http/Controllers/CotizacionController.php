@@ -2,14 +2,17 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\StoreCotizacionRequest;
 use App\Models\Client;
 use App\Models\Cotizacion;
 use App\Models\Lead;
 use App\Models\Project;
 use App\Models\ProjectMonthlyCapacity;
+use App\Models\Servicio;
 use App\Models\User;
-use App\Support\CotizacionNotifier;
 use App\Services\CustomerLifecycleNotifier;
+use App\Support\CotizacionNotifier;
+use App\Support\SolicitudNotifier;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -22,9 +25,142 @@ class CotizacionController extends Controller
 {
     public const ESTADOS = ['borrador', 'enviada', 'aceptada', 'rechazada'];
 
+    public function storePublic(StoreCotizacionRequest $request, SolicitudNotifier $notifier)
+    {
+        $datos = $request->validated();
+        $servicioIds = $datos['servicios_ids'] ?? [$datos['servicio_id']];
+        $servicios = Servicio::query()
+            ->where('activo', true)
+            ->whereIn('id', $servicioIds)
+            ->orderBy('orden')
+            ->orderBy('id')
+            ->get(['id', 'nombre', 'precio_desde']);
+
+        $montoCentimos = $servicios->sum(
+            fn (Servicio $servicio) => $servicio->precio_desde === null
+                ? 0
+                : (int) round((float) $servicio->precio_desde * 100)
+        );
+        $inversionEstimada = $servicios->contains(
+            fn (Servicio $servicio) => $servicio->precio_desde !== null
+        ) ? $montoCentimos / 100 : null;
+        $contacto = trim($datos['contacto']);
+        $esCorreo = filter_var($contacto, FILTER_VALIDATE_EMAIL) !== false;
+        $lead = Lead::create([
+            'nombre' => trim($datos['nombre']),
+            'empresa' => $datos['empresa'] ?? null,
+            'email' => $esCorreo ? $contacto : null,
+            'telefono' => $esCorreo ? null : $contacto,
+            'servicio' => $servicios->pluck('nombre')->implode(', '),
+            'mensaje' => $datos['mensaje'] ?? null,
+            'inversion_estimada' => $inversionEstimada,
+        ]);
+        $notificacion = $notifier->notify($lead);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'La solicitud de cotización fue recibida correctamente.',
+            'data' => [
+                'id' => $lead->id,
+                'inversion_estimada' => $lead->inversion_estimada,
+            ],
+            ...$notificacion,
+        ], 201);
+    }
+
     public function index(Lead $lead)
     {
         return response()->json($lead->cotizaciones()->latest()->get());
+    }
+
+    public function clientIndex(Request $request)
+    {
+        $client = $request->user()->client;
+        abort_unless($client, 404);
+
+        $quotes = Cotizacion::query()
+            ->with('lead:id,nombre,email')
+            ->whereIn('estado', ['enviada', 'aceptada', 'rechazada'])
+            ->whereHas('lead', function ($query) use ($client, $request) {
+                $query->where(function ($query) use ($client, $request) {
+                    $query->where('email', $request->user()->email);
+                    if ($client->lead_id !== null) {
+                        $query->orWhere('id', $client->lead_id);
+                    }
+                })->where(function ($query) use ($request) {
+                    $query->whereDoesntHave('client')
+                        ->orWhereHas('client', fn ($clientQuery) => $clientQuery
+                            ->where('user_id', $request->user()->id));
+                });
+            })
+            ->latest()
+            ->get();
+
+        return response()->json($quotes);
+    }
+
+    public function clientRespond(Request $request, Cotizacion $cotizacion)
+    {
+        $datos = $request->validate([
+            'respuesta' => ['required', Rule::in(['aceptada', 'rechazada'])],
+        ]);
+
+        [$cotizacion, $newlyAccepted] = DB::transaction(function () use ($request, $cotizacion, $datos) {
+            $cotizacion = Cotizacion::whereKey($cotizacion->id)->lockForUpdate()->firstOrFail();
+            $lead = Lead::whereKey($cotizacion->lead_id)->lockForUpdate()->firstOrFail();
+            $client = $request->user()->client;
+
+            if (! $client) {
+                abort(404);
+            }
+
+            $ownsLead = $client->lead_id === $lead->id
+                || (
+                    filled($lead->email)
+                    && strcasecmp($lead->email, $request->user()->email) === 0
+                );
+            if (! $ownsLead) {
+                abort(404);
+            }
+
+            if ($lead->client && $lead->client->user_id !== $request->user()->id) {
+                abort(404);
+            }
+
+            if ($cotizacion->estado !== 'enviada') {
+                throw ValidationException::withMessages([
+                    'cotizacion' => 'Solo puedes responder cotizaciones que estén enviadas y aún no hayan sido respondidas.',
+                ]);
+            }
+
+            if ($datos['respuesta'] === 'aceptada') {
+                if ((float) $cotizacion->monto <= 0 || blank($cotizacion->descripcion)) {
+                    throw ValidationException::withMessages([
+                        'cotizacion' => 'La cotización debe tener un monto y alcance válidos antes de aceptarse.',
+                    ]);
+                }
+
+                $clientForProject = $this->ensureClientForLead($lead);
+                if ($clientForProject->user_id !== $request->user()->id) {
+                    abort(404);
+                }
+                $this->createProjectForAcceptedQuote($cotizacion, $clientForProject);
+                $lead->update(['estado' => 'ganado']);
+            }
+
+            $cotizacion->update([
+                'estado' => $datos['respuesta'],
+                'responded_at' => now(),
+            ]);
+
+            return [$cotizacion->refresh(), $datos['respuesta'] === 'aceptada'];
+        });
+
+        if ($newlyAccepted) {
+            $this->notifyAcceptedQuote($cotizacion);
+        }
+
+        return response()->json($cotizacion->load('lead:id,nombre,email'));
     }
 
     public function store(Request $request, Lead $lead)
@@ -107,35 +243,7 @@ class CotizacionController extends Controller
 
             if ($estado === 'aceptada') {
                 $client = $this->ensureClientForLead($lead);
-
-                $month = now()->startOfMonth()->toDateString();
-                $capacity = ProjectMonthlyCapacity::firstOrCreate(
-                    ['month' => $month],
-                    ['capacity' => 10, 'reserved' => 0],
-                );
-                $capacity = ProjectMonthlyCapacity::whereKey($capacity->id)->lockForUpdate()->firstOrFail();
-                $projectExists = Project::where('cotizacion_id', $cotizacion->id)->exists();
-
-                if (! $projectExists && $capacity->reserved >= $capacity->capacity) {
-                    throw ValidationException::withMessages([
-                        'capacidad' => 'No quedan cupos de proyectos disponibles para este mes.',
-                    ]);
-                }
-
-                $project = Project::firstOrCreate(
-                    ['cotizacion_id' => $cotizacion->id],
-                    [
-                        'client_id' => $client->id,
-                        'nombre' => $cotizacion->servicio,
-                        'descripcion' => $cotizacion->descripcion,
-                        'estado' => 'planificacion',
-                        'progreso' => 0,
-                    ]
-                );
-
-                if ($project->wasRecentlyCreated) {
-                    $capacity->increment('reserved');
-                }
+                $this->createProjectForAcceptedQuote($cotizacion, $client);
             }
 
             if ($tieneAceptada) {
@@ -155,35 +263,21 @@ class CotizacionController extends Controller
         }
 
         if ($newlyAccepted) {
-            $project = Project::query()
-                ->with('client.user')
-                ->where('cotizacion_id', $cotizacion->id)
-                ->firstOrFail();
-            $user = $project->client?->user;
-            if ($user) {
-                app(CustomerLifecycleNotifier::class)->notify(
-                    eventType: 'project_onboarding',
-                    email: $user->email,
-                    subject: 'Comencemos tu proyecto con DigitalPyme',
-                    intro: 'Tu propuesta fue aceptada. Completa el brief para que el equipo pueda iniciar el trabajo.',
-                    details: [
-                        'Proyecto: '.$project->nombre,
-                        'El enlace seguro del formulario vence en 30 días.',
-                    ],
-                    userId: $user->id,
-                    actionLabel: 'Completar mi brief',
-                    actionUrl: URL::temporarySignedRoute(
-                        'project-brief.show',
-                        now()->addDays(30),
-                        ['project' => $project->id],
-                    ),
-                );
-            }
+            $this->notifyAcceptedQuote($cotizacion);
         }
+
+        $emailMessage = $emailEnviado === null
+            ? []
+            : [
+                'email_enviado' => $emailEnviado,
+                'mensaje' => $emailEnviado
+                    ? 'Cotización enviada correctamente al correo del cliente.'
+                    : 'La cotización quedó marcada como enviada, pero no se pudo entregar el correo. Configura y verifica el servicio SMTP antes de informar al cliente.',
+            ];
 
         return response()->json([
             ...$cotizacion->refresh()->toArray(),
-            ...($emailEnviado === null ? [] : ['email_enviado' => $emailEnviado]),
+            ...$emailMessage,
         ]);
     }
 
@@ -195,9 +289,14 @@ class CotizacionController extends Controller
             ]);
         }
 
+        $emailEnviado = $notifier->send($cotizacion);
+
         return response()->json([
             ...$cotizacion->toArray(),
-            'email_enviado' => $notifier->send($cotizacion),
+            'email_enviado' => $emailEnviado,
+            'mensaje' => $emailEnviado
+                ? 'Cotización reenviada correctamente al correo del cliente.'
+                : 'No se pudo reenviar la cotización. Verifica la configuración SMTP y vuelve a intentarlo.',
         ]);
     }
 
@@ -218,10 +317,19 @@ class CotizacionController extends Controller
         $user = User::where('email', $lead->email)->first();
 
         if ($user) {
-            if (! $user->is_client || $user->client) {
+            if (! $user->is_client) {
                 throw ValidationException::withMessages([
                     'lead' => 'El correo del lead ya pertenece a otra cuenta. Convierte el lead en cliente con otro correo antes de aceptar.',
                 ]);
+            }
+
+            $client = $user->client;
+            if ($client) {
+                if ($client->lead_id === null) {
+                    $client->update(['lead_id' => $lead->id]);
+                }
+
+                return $client;
             }
         } else {
             $user = new User;
@@ -238,5 +346,69 @@ class CotizacionController extends Controller
             'nombre' => $lead->nombre,
             'empresa' => $lead->empresa,
         ]);
+    }
+
+    private function createProjectForAcceptedQuote(Cotizacion $cotizacion, Client $client): Project
+    {
+        $month = now()->startOfMonth()->toDateString();
+        $capacity = ProjectMonthlyCapacity::firstOrCreate(
+            ['month' => $month],
+            ['capacity' => 10, 'reserved' => 0],
+        );
+        $capacity = ProjectMonthlyCapacity::whereKey($capacity->id)->lockForUpdate()->firstOrFail();
+        $projectExists = Project::where('cotizacion_id', $cotizacion->id)->exists();
+
+        if (! $projectExists && $capacity->reserved >= $capacity->capacity) {
+            throw ValidationException::withMessages([
+                'capacidad' => 'No quedan cupos de proyectos disponibles para este mes.',
+            ]);
+        }
+
+        $project = Project::firstOrCreate(
+            ['cotizacion_id' => $cotizacion->id],
+            [
+                'client_id' => $client->id,
+                'nombre' => $cotizacion->servicio,
+                'descripcion' => $cotizacion->descripcion,
+                'estado' => 'planificacion',
+                'progreso' => 0,
+            ]
+        );
+
+        if ($project->wasRecentlyCreated) {
+            $capacity->increment('reserved');
+        }
+
+        return $project;
+    }
+
+    private function notifyAcceptedQuote(Cotizacion $cotizacion): void
+    {
+        $project = Project::query()
+            ->with('client.user')
+            ->where('cotizacion_id', $cotizacion->id)
+            ->firstOrFail();
+        $user = $project->client?->user;
+        if (! $user) {
+            return;
+        }
+
+        app(CustomerLifecycleNotifier::class)->notify(
+            eventType: 'project_onboarding',
+            email: $user->email,
+            subject: 'Comencemos tu proyecto con DigitalPyme',
+            intro: 'Tu propuesta fue aceptada. Completa el brief para que el equipo pueda iniciar el trabajo.',
+            details: [
+                'Proyecto: '.$project->nombre,
+                'El enlace seguro del formulario vence en 30 días.',
+            ],
+            userId: $user->id,
+            actionLabel: 'Completar mi brief',
+            actionUrl: URL::temporarySignedRoute(
+                'project-brief.show',
+                now()->addDays(30),
+                ['project' => $project->id],
+            ),
+        );
     }
 }

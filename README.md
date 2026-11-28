@@ -9,6 +9,43 @@
 
 ## About Laravel
 
+## DigitalPyme setup
+
+Copy `.env.example` to `.env`, generate `APP_KEY`, configure the database and mail provider, then run:
+
+```bash
+composer install
+npm install
+npm run build
+php artisan key:generate
+php artisan migrate
+php artisan db:seed
+php artisan serve
+```
+
+Production and Docker deployments must run migrations before starting traffic. Start a queue worker because notifications and emails use queued jobs:
+
+```bash
+php artisan queue:work --sleep=3 --tries=3 --timeout=60
+```
+
+Docker Compose starts the web application, scheduler, queue worker and a private Redis service. Docker uses Redis for cache, sessions and queues; local `.env` defaults can continue using the database:
+
+```bash
+docker compose run --rm app php artisan migrate --force
+docker compose up -d --build
+docker compose ps
+docker compose logs -f app queue
+```
+
+The `/up` endpoint can be used for container and hosting health checks. Laravel logs are written to container stderr in Compose, with Docker log rotation capped at three 10 MB files per service. After configuring the production environment, run `php artisan optimize` for the release; run `php artisan optimize:clear` when changing cached configuration or diagnosing a deployment.
+
+Keep `APP_ENV=production`, `APP_DEBUG=false`, and set `SESSION_SECURE_COOKIE=true` when the site is served over HTTPS. Configure the database provider's automated backups and verify a restore to a separate environment before launch. Back up the `digitalpyme-uploads` volume; Redis queue/cache/session data is not a substitute for application/database backups and should be treated as operational state. Because the database provider is deployment-specific, configure its supported backup and alerting tools rather than placing database credentials in this repository.
+
+Admin list endpoints for leads, clients, projects, project payments, service reviews, and agenda reservations accept `per_page` (1-100, default 50) and `page` (default 1). The JSON response remains an array for existing clients; pagination details are available in the `X-Pagination-Total`, `X-Pagination-Current-Page`, `X-Pagination-Last-Page`, and `X-Pagination-Per-Page` headers.
+
+Manual payment review records the latest administrator and timestamp on project payments and store orders, and persists every decision in `manual_payment_reviews`. A reviewed payment cannot be reviewed again unless the store order is rejected and the customer submits a new receipt. Inspect the latest-review fields and `review_history`/`payment_review_history` in admin responses. The scheduler checks queue depth every five minutes and logs warnings above 100 jobs; failed jobs are logged with their queue and job identifiers.
+
 Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
 
 - [Simple, fast routing engine](https://laravel.com/docs/routing).
@@ -35,7 +72,7 @@ For local development only, `php artisan client:password:local-test` assigns the
 
 Open the separate administration interface at `http://localhost:8443/?admin=1` and sign in with the administrator account. The panel includes operational metrics, lead and quote management, project progress, agenda slots and reservations, transfer receipt review, and CRUD for services, portfolio projects, and testimonials. It reuses the existing API and styling without adding an admin link to the public navigation.
 
-The portfolio includes DigitalPyme's own services catalog as a factual project entry, with no customer result claim, plus three clearly labeled visual sample concepts that are not client projects. The sample concepts use locally stored illustrative photographs from [Unsplash](https://unsplash.com/license); the image alt text identifies them as illustrations. Their detail fields are editable in the admin panel. Apply schema updates with `php artisan migrate`; running `php artisan db:seed` adds missing project details and updates only the sample projects' original illustration assets without overwriting details or images customized by an administrator. No customer testimonials are seeded: the website shows clearly labeled fictional layout examples only while there are no approved client reviews. Reviews submitted from the site remain private until approved in the admin panel. Once approved, the public page refreshes its review list when the visitor returns to the tab, and **Actualizar reseñas** or **Comprobar aprobación** can be used to check manually. The public review feed at `GET /api/resenas` supports `offset` and `limit` query parameters for loading additional approved reviews; unverified sample entries from earlier seed data are deactivated by migration.
+The portfolio includes DigitalPyme's own services catalog as a factual project entry, with no customer result claim, plus three clearly labeled visual sample concepts that are not client projects. The sample concepts use locally stored illustrative photographs from [Unsplash](https://unsplash.com/license); the image alt text identifies them as illustrations. Their detail fields are editable in the admin panel. Apply schema updates with `php artisan migrate`; running `php artisan db:seed` adds missing project details and updates only the sample projects' original illustration assets without overwriting details or images customized by an administrator. No customer testimonials are seeded: the website shows clearly labeled fictional layout examples only while there are no approved client reviews. Reviews submitted from the site remain private until approved in the admin panel. Once approved, the public page refreshes its review list when the visitor returns to the tab, and **Actualizar reseñas** or **Comprobar aprobación** can be used to check manually. The public review feed at `GET /api/resenas` supports `offset` and `limit` query parameters and returns `data`, `meta.total`, and `status`; if the database is unavailable, it can serve the last cached approved reviews. Unverified sample entries from earlier seed data are deactivated by migration. The separate public portfolio endpoint `GET /api/proyectos` lists active seeded projects, and `POST /api/cotizaciones` accepts one `servicio_id` or cart `servicios_ids` and saves the estimated total on the lead.
 
 The public WhatsApp contact is intentionally unset by default. Configure it under **SEO y tema → Datos de contacto** with an international number such as `+51...`; the site and proposal notifications use that value. Until configured, no WhatsApp contact number or link is displayed.
 
@@ -47,13 +84,26 @@ The public quote configurator requires a commercial contact form with name, surn
 
 The verification code is delivered through the configured Laravel mailer. Configure and test a production SMTP/mail provider before enabling real quote requests; `MAIL_MAILER=log` is for local development and does not deliver email. The privacy notice is still unpublished by default, so the site owner should review and publish the privacy policy before collecting real customer details.
 
-In Panel administrador → Solicitudes, keep a request in review while confirming its scope and price. Mark a priced quote as “Enviada” to email the customer a PDF summary; a draft with a zero amount cannot be sent or accepted. Only an accepted quote creates a project and enables its payment methods. Confirmed project payments produce an informational PDF receipt, available in the client portal and sent by email when the mailer is configured. This receipt is not a SUNAT electronic invoice or tax receipt.
+In Panel administrador → Solicitudes, keep a request in review while confirming its scope and price. Mark a priced quote as “Enviada” to email the customer a PDF summary; the API returns `email_enviado` and a delivery message, and does not report success when the mailer is only `log` or `array`. Use `POST /api/cotizaciones/{cotizacion}/reenviar` to retry delivery. A draft with a zero amount cannot be sent or accepted. Authenticated clients can list their sent quotes with `GET /api/client/cotizaciones` and respond once using `POST /api/client/cotizaciones/{cotizacion}/respuesta` with `{"respuesta":"aceptada"}` or `{"respuesta":"rechazada"}`; the response timestamp is stored as `responded_at`. Only an accepted quote creates a project and enables its payment methods. Confirmed project payments produce an informational PDF receipt, available in the client portal and sent by email when the mailer is configured. This receipt is not a SUNAT electronic invoice or tax receipt.
 
 The final quote-request step records an optional preferred payment method (card, bank transfer, Yape/Plin, or undecided). It is saved with the request and visible in **Solicitudes**; it does not initiate a charge. To test payment operation, issue and accept the final priced quote, then start the corresponding payment from the client's project portal. Card payments use Mercado Pago Sandbox when `MERCADOPAGO_ENVIRONMENT=sandbox`; manual methods require their payment instructions and receipt review to be configured.
 
 ### Local email notifications
 
-The example environment uses the `log` mailer, which does not deliver messages. For low-volume local testing with Gmail, enable 2-Step Verification on the mailbox, create a Google App Password, and keep it only in the ignored backend `.env` file:
+The example environment uses the `log` mailer, which does not deliver messages. For a demo, create a Mailtrap Email Testing inbox and copy its SMTP credentials only into the ignored backend `.env` file:
+
+```dotenv
+MAIL_MAILER=smtp
+MAIL_SCHEME=tls
+MAIL_HOST=sandbox.smtp.mailtrap.io
+MAIL_PORT=2525
+MAIL_USERNAME=your-mailtrap-username
+MAIL_PASSWORD=your-mailtrap-password
+MAIL_FROM_ADDRESS="hello@example.com"
+MAIL_FROM_NAME=DigitalPyme
+```
+
+Mailtrap captures messages in its test inbox instead of delivering them to real customers. Never commit or share its credentials. For low-volume local testing with Gmail, enable 2-Step Verification on the mailbox, create a Google App Password, and keep it only in the ignored backend `.env` file:
 
 ```dotenv
 MAIL_MAILER=smtp

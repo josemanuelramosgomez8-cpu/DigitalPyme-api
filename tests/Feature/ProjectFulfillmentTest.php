@@ -2,13 +2,18 @@
 
 namespace Tests\Feature;
 
+use App\Events\CustomerLifecycleNotificationRequested;
+use App\Events\ProjectStatusChanged;
+use App\Listeners\SendProjectStatusNotification;
 use App\Models\Client;
 use App\Models\ProjectBrief;
 use App\Models\Project;
 use App\Models\ProjectPayment;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
+use App\Services\CustomerLifecycleNotifier;
 use Tests\TestCase;
 
 class ProjectFulfillmentTest extends TestCase
@@ -49,7 +54,8 @@ class ProjectFulfillmentTest extends TestCase
             ->assertOk()
             ->assertJsonPath('recepcion_checklist.accesos_coordinados', true)
             ->assertJsonPath('notas_preparacion', 'Nota interna: revisar integración de dominio.')
-            ->assertJsonPath('payments.0.currency', 'USD');
+            ->assertJsonPath('payments.0.currency', 'USD')
+            ->assertJsonPath('payments.0.method', 'bank_transfer');
 
         $this->getJson('/api/admin/projects')
             ->assertOk()
@@ -157,6 +163,32 @@ class ProjectFulfillmentTest extends TestCase
                 'resumen_entrega',
                 'url_entregable',
             ]);
+    }
+
+    public function test_project_status_email_includes_payment_method_and_currency(): void
+    {
+        Event::fake([CustomerLifecycleNotificationRequested::class]);
+        [$clientUser, $project] = $this->createProject();
+        ProjectPayment::create([
+            'reference' => (string) Str::uuid(),
+            'project_id' => $project->id,
+            'method' => 'yape_plin',
+            'amount' => 245.50,
+            'currency' => 'USD',
+            'status' => 'pagado',
+            'paid_at' => now(),
+        ]);
+
+        $listener = new SendProjectStatusNotification(app(CustomerLifecycleNotifier::class));
+        $listener->handle(new ProjectStatusChanged($project, 'planificacion', 'en_progreso'));
+
+        Event::assertDispatched(
+            CustomerLifecycleNotificationRequested::class,
+            fn (CustomerLifecycleNotificationRequested $notification) => $notification->recipientEmail === $clientUser->email
+                && in_array('Método de pago: Yape o Plin', $notification->details, true)
+                && in_array('Moneda de pago: USD', $notification->details, true)
+                && in_array('Importe registrado: USD 245.50', $notification->details, true),
+        );
     }
 
     private function createProject(): array

@@ -10,6 +10,7 @@ use App\Http\Controllers\ClientProjectDeliveryController;
 use App\Http\Controllers\CotizacionController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\PortfolioProjectController;
+use App\Http\Controllers\ProyectoController;
 use App\Http\Controllers\ProjectCapacityController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\ProjectDocumentController;
@@ -19,6 +20,7 @@ use App\Http\Controllers\ProjectServiceRequestController;
 use App\Http\Controllers\PublicQuoteController;
 use App\Http\Controllers\PublicQuoteVerificationController;
 use App\Http\Controllers\ServiceCategoryController;
+use App\Http\Controllers\ServiceCartSessionController;
 use App\Http\Controllers\ServiceInventoryController;
 use App\Http\Controllers\ServiceReviewController;
 use App\Http\Controllers\ServicioController;
@@ -34,9 +36,22 @@ use Illuminate\Support\Facades\Route;
 
 // Público
 Route::post('/leads', [LeadController::class, 'store'])->middleware('throttle:5,1');
+Route::post('/cotizaciones', [CotizacionController::class, 'storePublic'])->middleware('throttle:5,1');
 Route::post('/propuestas/codigo', [PublicQuoteVerificationController::class, 'sendCode'])->middleware('throttle:3,1');
 Route::post('/propuestas/verificar-codigo', [PublicQuoteVerificationController::class, 'verifyCode'])->middleware('throttle:5,1');
 Route::post('/propuestas', [PublicQuoteController::class, 'store'])->middleware('throttle:5,1');
+Route::put('/service-cart-sessions/{token}', [ServiceCartSessionController::class, 'upsert'])
+    ->middleware('throttle:20,1')
+    ->whereUuid('token')
+    ->name('service-carts.upsert');
+Route::get('/service-cart-sessions/{token}/restore', [ServiceCartSessionController::class, 'restore'])
+    ->middleware(['signed:relative', 'throttle:10,1'])
+    ->whereUuid('token')
+    ->name('service-carts.restore');
+Route::get('/service-cart-sessions/{token}/unsubscribe', [ServiceCartSessionController::class, 'unsubscribe'])
+    ->middleware(['signed:relative', 'throttle:5,1'])
+    ->whereUuid('token')
+    ->name('service-carts.unsubscribe');
 Route::get('/servicios', [ServicioController::class, 'publicos']);
 Route::get('/servicios/{slug}', [ServicioController::class, 'show'])->where('slug', '[a-z0-9-]+');
 Route::get('/servicios/{servicio}/resenas', [ServiceReviewController::class, 'index'])->whereNumber('servicio');
@@ -44,6 +59,7 @@ Route::post('/servicios/{servicio}/resenas', [ServiceReviewController::class, 's
 Route::get('/resenas', [ServiceReviewController::class, 'publicos']);
 Route::get('/categorias-servicios', [ServiceCategoryController::class, 'publicIndex']);
 Route::get('/portafolio', [PortfolioProjectController::class, 'publicos']);
+Route::get('/proyectos', [ProyectoController::class, 'index']);
 Route::get('/testimonios', [TestimonioController::class, 'publicos']);
 Route::get('/site-settings', [SiteSettingsController::class, 'show']);
 Route::get('/cobertura', [SiteSettingsController::class, 'coverage']);
@@ -69,6 +85,9 @@ Route::get('/store/carts/{storeCart}/unsubscribe', [StoreCartController::class, 
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/user', fn (Request $request) => $request->user());
+    Route::post('/pagos/transferencia', [ProjectPaymentController::class, 'submitTransfer'])
+        ->middleware([EnsureClient::class, 'throttle:10,1'])
+        ->name('client.payments.transfer.submit');
 
     Route::middleware(EnsureAdmin::class)->group(function () {
         Route::get('/admin/dashboard', [AdminDashboardController::class, 'show']);
@@ -145,6 +164,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/admin/testimonios/{testimonio}', [TestimonioController::class, 'destroy']);
 
         Route::get('/admin/projects', [ProjectController::class, 'index']);
+        Route::get('/admin/service-cart-sessions', [ServiceCartSessionController::class, 'adminIndex']);
+        Route::post('/admin/service-cart-sessions/{serviceCartSession}/reminder', [ServiceCartSessionController::class, 'sendReminder'])
+            ->middleware('throttle:10,1')
+            ->name('admin.service-cart-sessions.reminder');
         Route::post('/admin/projects', [ProjectController::class, 'store']);
         Route::patch('/admin/projects/{project}', [ProjectController::class, 'update'])
             ->name('admin.projects.update');
@@ -166,6 +189,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::middleware(EnsureClient::class)->prefix('client')->group(function () {
         Route::put('/password', [AuthController::class, 'clientChangePassword'])->name('client.password');
         Route::get('/profile', [ClientController::class, 'profile']);
+        Route::get('/cotizaciones', [CotizacionController::class, 'clientIndex']);
+        Route::post('/cotizaciones/{cotizacion}/respuesta', [CotizacionController::class, 'clientRespond']);
         Route::get('/store/cart', [StoreCartController::class, 'show']);
         Route::get('/notifications', [ClientNotificationController::class, 'index']);
         Route::patch('/notifications/{notification}/read', [ClientNotificationController::class, 'markRead']);

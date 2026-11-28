@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use App\Events\ProjectStatusChanged;
 use App\Models\Project;
 use App\Models\ProjectMilestone;
+use App\Services\CustomerLifecycleNotifier;
+use App\Support\AdminJsonPagination;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -12,27 +14,30 @@ use Illuminate\Validation\ValidationException;
 
 class ProjectController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $projects = Project::query()
-            ->with([
-                'client:id,nombre,empresa,telefono',
-                'cotizacion:id,servicio,monto,estado',
-                'brief:id,project_id,answers,submitted_at',
-                'serviceRequests' => fn ($query) => $query->latest(),
-                'payments' => fn ($query) => $query
-                    ->select(['id', 'project_id', 'currency', 'status', 'amount'])
-                    ->orderByDesc('id'),
-            ])
-            ->latest()
-            ->get();
+        $projects = AdminJsonPagination::paginate(
+            Project::query()
+                ->with([
+                    'client:id,nombre,empresa,telefono',
+                    'cotizacion:id,servicio,monto,estado',
+                    'brief:id,project_id,answers,submitted_at',
+                    'serviceRequests' => fn ($query) => $query->latest(),
+                    'payments' => fn ($query) => $query
+                        ->select(['id', 'project_id', 'currency', 'status', 'amount', 'method', 'reviewed_by', 'reviewed_at'])
+                        ->orderByDesc('id'),
+                ])
+                ->latest(),
+            $request,
+        );
 
-        $projects->each(function (Project $project) {
+        collect($projects->items())->each(function (Project $project) {
             $project->makeVisible(['recepcion_checklist', 'notas_preparacion']);
             $project->serviceRequests->each->makeVisible('internal_notes');
+            $project->payments->each->makeVisible(['reviewed_by', 'reviewed_at']);
         });
 
-        return response()->json($projects);
+        return AdminJsonPagination::respond($projects);
     }
 
     public function store(Request $request)
@@ -192,7 +197,7 @@ class ProjectController extends Controller
             'brief:id,project_id,answers,submitted_at',
             'serviceRequests' => fn ($query) => $query->latest(),
             'payments' => fn ($query) => $query
-                ->select(['id', 'project_id', 'currency', 'status', 'amount'])
+                ->select(['id', 'project_id', 'currency', 'status', 'amount', 'method'])
                 ->orderByDesc('id'),
         ]);
         $project->serviceRequests->each->makeVisible('internal_notes');
@@ -251,9 +256,8 @@ class ProjectController extends Controller
         Request $request,
         Project $project,
         ProjectMilestone $milestone,
-        \App\Services\CustomerLifecycleNotifier $notifier,
-    )
-    {
+        CustomerLifecycleNotifier $notifier,
+    ) {
         abort_unless($milestone->project_id === $project->id, 404);
 
         $data = $request->validate([

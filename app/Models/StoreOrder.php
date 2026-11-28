@@ -37,6 +37,8 @@ class StoreOrder extends Model
         'receipt_size',
         'receipt_uploaded_at',
         'paid_at',
+        'payment_reviewed_by',
+        'payment_reviewed_at',
         'payment_due_at',
         'display_currency',
         'display_exchange_rate',
@@ -60,7 +62,14 @@ class StoreOrder extends Model
         'entregado_at',
     ];
 
-    protected $hidden = ['receipt_path', 'provider_reference', 'provider_preference_id', 'provider_checkout_url'];
+    protected $hidden = [
+        'receipt_path',
+        'provider_reference',
+        'provider_preference_id',
+        'provider_checkout_url',
+        'payment_reviewed_by',
+        'payment_reviewed_at',
+    ];
 
     protected function casts(): array
     {
@@ -74,6 +83,7 @@ class StoreOrder extends Model
             'receipt_size' => 'integer',
             'receipt_uploaded_at' => 'datetime',
             'paid_at' => 'datetime',
+            'payment_reviewed_at' => 'datetime',
             'payment_due_at' => 'datetime',
             'display_exchange_rate' => 'decimal:6',
             'legal_accepted_at' => 'datetime',
@@ -128,5 +138,15 @@ class StoreOrder extends Model
     public function returnRequest(): HasOne
     {
         return $this->hasOne(StoreReturn::class, 'order_id');
+    }
+
+    public function paymentReviewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'payment_reviewed_by');
+    }
+
+    public function paymentReviewHistory(): HasMany
+    {
+        return $this->hasMany(ManualPaymentReview::class)->orderByDesc('id');
     }
 }

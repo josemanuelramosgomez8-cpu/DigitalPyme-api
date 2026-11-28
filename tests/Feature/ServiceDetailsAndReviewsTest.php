@@ -6,6 +6,8 @@ use App\Models\ServiceCategory;
 use App\Models\Servicio;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
 class ServiceDetailsAndReviewsTest extends TestCase
@@ -48,11 +50,13 @@ class ServiceDetailsAndReviewsTest extends TestCase
 
         $this->getJson('/api/resenas')
             ->assertOk()
-            ->assertJsonCount(1)
-            ->assertJsonPath('0.id', $approvedReview->id)
-            ->assertJsonPath('0.service.slug', 'landing-page')
-            ->assertJsonPath('0.calificacion', 5)
-            ->assertJsonMissingPath('0.email');
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $approvedReview->id)
+            ->assertJsonPath('data.0.service.slug', 'landing-page')
+            ->assertJsonPath('data.0.calificacion', 5)
+            ->assertJsonMissingPath('data.0.email')
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('status', 'success');
     }
 
     public function test_public_review_feed_supports_stable_pagination(): void
@@ -75,19 +79,55 @@ class ServiceDetailsAndReviewsTest extends TestCase
 
         $this->getJson('/api/resenas?offset=0&limit=3')
             ->assertOk()
-            ->assertJsonCount(3)
-            ->assertJsonPath('0.id', $reviewIds[7])
-            ->assertJsonPath('2.id', $reviewIds[5])
-            ->assertJsonMissingPath('0.email');
+            ->assertJsonCount(3, 'data')
+            ->assertJsonPath('data.0.id', $reviewIds[7])
+            ->assertJsonPath('data.2.id', $reviewIds[5])
+            ->assertJsonMissingPath('data.0.email')
+            ->assertJsonPath('meta.total', 8);
 
         $this->getJson('/api/resenas?offset=3&limit=3')
             ->assertOk()
-            ->assertJsonCount(3)
-            ->assertJsonPath('0.id', $reviewIds[4])
-            ->assertJsonPath('2.id', $reviewIds[2]);
+            ->assertJsonCount(3, 'data')
+            ->assertJsonPath('data.0.id', $reviewIds[4])
+            ->assertJsonPath('data.2.id', $reviewIds[2]);
 
         $this->getJson('/api/resenas?offset=-1')->assertUnprocessable();
         $this->getJson('/api/resenas?limit=51')->assertUnprocessable();
+    }
+
+    public function test_public_review_feed_uses_the_last_successful_cache_when_database_query_fails(): void
+    {
+        $cache = Cache::store('file');
+        $cache->forget('public-service-reviews:last-successful');
+        $cache->forget('public-service-reviews:database-outage');
+        $service = Servicio::create([
+            'nombre' => 'Landing page',
+            'slug' => 'landing-page',
+            'activo' => true,
+        ]);
+        $service->reviews()->create([
+            'nombre' => 'Cliente',
+            'email' => 'private@example.com',
+            'calificacion' => 5,
+            'comentario' => 'Reseña aprobada.',
+            'aprobada' => true,
+        ]);
+
+        $this->getJson('/api/resenas')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('status', 'success');
+
+        Schema::drop('service_reviews');
+
+        $this->getJson('/api/resenas')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.nombre', 'Cliente')
+            ->assertJsonPath('status', 'degraded');
+
+        $cache->forget('public-service-reviews:last-successful');
+        $cache->forget('public-service-reviews:database-outage');
     }
 
     public function test_service_details_return_slug_taxonomy_and_only_approved_reviews_without_private_email(): void

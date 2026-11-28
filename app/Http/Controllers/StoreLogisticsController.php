@@ -4,17 +4,18 @@ namespace App\Http\Controllers;
 
 use App\Enums\StoreOrderStatus;
 use App\Events\StoreOrderStatusChanged;
+use App\Http\Requests\StoreCheckoutRequest;
+use App\Http\Requests\StoreShippingQuoteRequest;
+use App\Models\ManualPaymentReview;
 use App\Models\SiteSetting;
-use App\Models\StoreCart;
 use App\Models\StockMovement;
+use App\Models\StoreCart;
+use App\Models\StoreCoupon;
 use App\Models\StoreOrder;
 use App\Models\StoreProduct;
 use App\Models\StoreReturn;
-use App\Models\StoreCoupon;
-use App\Support\StoreOrderNotifier;
 use App\Support\StoreCurrency;
-use App\Http\Requests\StoreCheckoutRequest;
-use App\Http\Requests\StoreShippingQuoteRequest;
+use App\Support\StoreOrderNotifier;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -282,7 +283,7 @@ class StoreLogisticsController extends Controller
 
             foreach ($data['items'] as $item) {
                 $product = $productsById[$item['product_id']];
-                if (!$product->activo || $product->stock < $item['cantidad']) {
+                if (! $product->activo || $product->stock < $item['cantidad']) {
                     throw ValidationException::withMessages([
                         'items' => "Stock insuficiente para {$product->nombre}.",
                     ]);
@@ -637,7 +638,13 @@ class StoreLogisticsController extends Controller
             ->orderByDesc('created_at')
             ->orderByDesc('id')
             ->paginate($perPage, ['*'], 'movements_page');
-        $orders = StoreOrder::with(['client:id,nombre,empresa', 'items.product:id,ubicacion_almacen', 'returnRequest'])
+        $orders = StoreOrder::with([
+            'client:id,nombre,empresa',
+            'items.product:id,ubicacion_almacen',
+            'returnRequest',
+            'paymentReviewer:id,name',
+            'paymentReviewHistory.reviewer:id,name',
+        ])
             ->orderByDesc('created_at')
             ->orderByDesc('id')
             ->paginate($perPage, ['*'], 'orders_page');
@@ -649,6 +656,7 @@ class StoreLogisticsController extends Controller
             ->orderByDesc('created_at')
             ->orderByDesc('id')
             ->paginate($perPage, ['*'], 'returns_page');
+        $orders->getCollection()->each->makeVisible(['payment_reviewed_by', 'payment_reviewed_at']);
 
         return response()->json([
             'products' => $products->items(),
@@ -868,9 +876,15 @@ class StoreLogisticsController extends Controller
                 throw ValidationException::withMessages(['codigo_rastreo' => 'Registra el código de rastreo antes de marcar el pedido como enviado.']);
             }
 
-            if (($data['estado'] ?? null) === 'enviado') $data['enviado_at'] = now();
-            if (($data['estado'] ?? null) === 'entregado') $data['entregado_at'] = now();
-            if ($operation !== '3PL') $data['operador_logistico'] = null;
+            if (($data['estado'] ?? null) === 'enviado') {
+                $data['enviado_at'] = now();
+            }
+            if (($data['estado'] ?? null) === 'entregado') {
+                $data['entregado_at'] = now();
+            }
+            if ($operation !== '3PL') {
+                $data['operador_logistico'] = null;
+            }
             $order->update($data);
 
             return [$order->refresh(), $previousStatus];
@@ -919,6 +933,8 @@ class StoreLogisticsController extends Controller
                     'receipt_size' => $file->getSize(),
                     'receipt_uploaded_at' => now(),
                     'payment_status' => 'comprobante_enviado',
+                    'payment_reviewed_by' => null,
+                    'payment_reviewed_at' => null,
                 ]);
 
                 return $previousPath;
@@ -949,8 +965,9 @@ class StoreLogisticsController extends Controller
             'payment_status' => ['required', Rule::in(['pagado', 'rechazado'])],
         ]);
 
-        $order = DB::transaction(function () use ($storeOrder, $data) {
+        [$order, $previousStatus] = DB::transaction(function () use ($request, $storeOrder, $data) {
             $order = StoreOrder::query()->lockForUpdate()->findOrFail($storeOrder->id);
+            $previousStatus = $order->payment_status;
             if ($order->payment_status !== 'comprobante_enviado') {
                 throw ValidationException::withMessages([
                     'payment_status' => 'Solo puedes revisar pedidos con comprobante enviado.',
@@ -961,12 +978,33 @@ class StoreLogisticsController extends Controller
                 'payment_status' => $data['payment_status'],
                 'paid_at' => $data['payment_status'] === 'pagado' ? now() : null,
                 'payment_due_at' => $data['payment_status'] === 'pagado' ? null : now()->addHours(24),
+                'payment_reviewed_by' => $request->user()->id,
+                'payment_reviewed_at' => now(),
+            ]);
+            ManualPaymentReview::create([
+                'store_order_id' => $order->id,
+                'reviewed_by' => $request->user()->id,
+                'previous_status' => $previousStatus,
+                'new_status' => $data['payment_status'],
+                'reviewed_at' => now(),
             ]);
 
-            return $order;
+            return [$order->refresh(), $previousStatus];
         });
+        Log::info('Se revisó un comprobante de pago de pedido.', [
+            'order_id' => $order->id,
+            'reviewer_id' => $order->payment_reviewed_by,
+            'previous_status' => $previousStatus,
+            'new_status' => $order->payment_status,
+        ]);
 
-        $response = $order->load(['client:id,nombre,empresa', 'items', 'returnRequest'])->toArray();
+        $response = $order->load([
+            'client:id,nombre,empresa',
+            'items',
+            'returnRequest',
+            'paymentReviewer:id,name',
+            'paymentReviewHistory.reviewer:id,name',
+        ])->makeVisible(['payment_reviewed_by', 'payment_reviewed_at'])->toArray();
         if ($data['payment_status'] === 'pagado') {
             $response['receipt_email_sent'] = $orderNotifier->send($order);
         }
@@ -1040,7 +1078,7 @@ class StoreLogisticsController extends Controller
                 }
 
                 foreach ($order->items as $item) {
-                    if (!$item->product_id || !isset($productsById[$item->product_id])) {
+                    if (! $item->product_id || ! isset($productsById[$item->product_id])) {
                         continue;
                     }
                     $product = $productsById[$item->product_id];

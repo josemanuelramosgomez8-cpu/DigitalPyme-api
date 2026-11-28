@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Storage;
 class ProjectDocumentController extends Controller
 {
     private const VALIDATION_RULE = 'required|file|mimes:pdf,jpg,jpeg,png,doc,docx,xls,xlsx|max:10240';
+
     private const TYPE_RULE = 'sometimes|string|in:documento,comprobante';
 
     public function clientIndex(Request $request, Project $project)
@@ -76,7 +77,7 @@ class ProjectDocumentController extends Controller
     {
         $this->ensureDocumentBelongsToProject($project, $document);
 
-        if (!Storage::disk('uploads')->delete($document->file_path)) {
+        if (! Storage::disk('uploads')->delete($document->file_path)) {
             abort(500, 'No se pudo eliminar el archivo del almacenamiento.');
         }
 
@@ -100,12 +101,11 @@ class ProjectDocumentController extends Controller
         Project $project,
         string $tipo = 'documento',
         ?int $paymentId = null,
-    )
-    {
+    ) {
         $file = $request->file('file');
         $path = $file->store("projects/{$project->id}", 'uploads');
 
-        if (!is_string($path) || $path === '') {
+        if (! is_string($path) || $path === '') {
             abort(500, 'No se pudo guardar el archivo.');
         }
 
@@ -152,7 +152,7 @@ class ProjectDocumentController extends Controller
 
     private function download(ProjectDocument $document)
     {
-        if (!Storage::disk('uploads')->exists($document->file_path)) {
+        if (! Storage::disk('uploads')->exists($document->file_path)) {
             abort(404, 'No se encontró el archivo solicitado.');
         }
 

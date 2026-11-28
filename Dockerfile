@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Extensiones de PHP requeridas por Laravel
 RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
+RUN pecl install redis && docker-php-ext-enable redis
 
 # Composer (versión 2 fija, en lugar de "latest")
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
@@ -39,7 +40,7 @@ RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-av
 
 # Dependencias de PHP y compilación de assets
 RUN composer install --no-dev --optimize-autoloader --no-interaction
-RUN npm install && npm run build
+RUN npm ci && npm run build
 
 # Carpetas de escritura de Laravel, con permisos mínimos (sin 777)
 RUN mkdir -p storage/app/private storage/app/public storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \

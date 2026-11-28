@@ -12,7 +12,10 @@ use App\Listeners\SendStoreOrderStatusNotification;
 use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Notifications\Events\NotificationFailed;
 use Illuminate\Notifications\Events\NotificationSent;
+use Illuminate\Queue\Events\JobFailed;
+use Illuminate\Queue\Events\QueueBusy;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -50,6 +53,22 @@ class AppServiceProvider extends ServiceProvider
             NotificationFailed::class,
             [RecordLifecycleNotificationDelivery::class, 'failed'],
         );
+        Event::listen(QueueBusy::class, function (QueueBusy $event): void {
+            Log::warning('La cola superó el umbral configurado.', [
+                'connection' => $event->connection,
+                'queue' => $event->queue,
+                'size' => $event->size,
+            ]);
+        });
+        Event::listen(JobFailed::class, function (JobFailed $event): void {
+            Log::error('Un trabajo de cola falló definitivamente.', [
+                'connection' => $event->connectionName,
+                'queue' => $event->job->getQueue(),
+                'job' => $event->job->resolveName(),
+                'job_id' => $event->job->getJobId(),
+                'exception' => $event->exception::class,
+            ]);
+        });
 
         ResetPassword::createUrlUsing(function (object $notifiable, string $token): string {
             $query = http_build_query([
